@@ -1,0 +1,17 @@
+{
+  "name": "clipcon",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "npm@10",
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:api": "npm --workspace apps/api run dev",
+    "start:api": "node apps/api/dist/server.js",
+    "start:worker": "node apps/worker/dist/worker.js",
+    "start:web": "npm --workspace apps/web run preview -- --host 0.0.0.0",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "bootstrap:master": "npm --workspace apps/api run bootstrap:master"
+  },
+  "workspaces": ["apps/web", "apps/api", "apps/worker"]
+}

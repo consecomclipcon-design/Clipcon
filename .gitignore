@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.turbo/
+.next/
+.env
+.env.*
+!.env.example
+!**/.env.example
+credentials.json
+client_secret.json
+service-account.json
+*.pem
+*.key
+tokens/
+tmp/
+coverage/
