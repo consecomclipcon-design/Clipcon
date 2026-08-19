@@ -1,12 +1,15 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import { config } from './config.js';
+import { readFile } from 'node:fs/promises';
+import { resolve, relative, sep } from 'node:path';
+import { config, listenPort } from './config.js';
 import { admin } from './supabase.js';
 import { createGoogleClient, encryptToken, googleConfigured, googleScopes, signOAuthState, verifyOAuthState } from './integrations/google.js';
 import { youtubeVideoId } from './youtube-url.js';
 
 const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie'] } });
 await app.register(cors, { origin: config.WEB_ORIGIN });
+const webRoot = resolve(new URL('../../web/dist', import.meta.url).pathname);
 app.get('/health', async () => ({ status: 'ok', service: 'clipcon-api' }));
 app.addHook('onRequest', async (request, reply) => {
   if (request.url === '/health') return;
@@ -84,7 +87,16 @@ app.get('/v1/integrations/google/callback', async (request, reply) => {
   if (error) return reply.code(503).send({ error: 'Could not save Google integration' });
   return reply.redirect(`${config.WEB_ORIGIN}/?google=connected`);
 });
+app.get('/*', async (request, reply) => {
+  if (request.method !== 'GET' || request.url.startsWith('/v1/')) return reply.code(404).send({ error: 'Not found' });
+  const requested = (request.params as { '*': string })['*'] || 'index.html';
+  const candidate = resolve(webRoot, requested);
+  const pathInsideRoot = relative(webRoot, candidate);
+  if (pathInsideRoot.startsWith(`..${sep}`) || pathInsideRoot === '..' || pathInsideRoot.includes(`..${sep}`)) return reply.code(404).send({ error: 'Not found' });
+  try { const content = await readFile(candidate); const extension = candidate.split('.').pop(); const types: Record<string, string> = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', svg: 'image/svg+xml', png: 'image/png', webp: 'image/webp' }; return reply.type(types[extension ?? ''] ?? 'application/octet-stream').send(content); }
+  catch { return reply.type('text/html; charset=utf-8').send(await readFile(resolve(webRoot, 'index.html'))); }
+});
 app.setErrorHandler((error, _request, reply) => { app.log.error(error); return reply.code(500).send({ error: 'Unexpected server error' }); });
-await app.listen({ port: config.API_PORT, host: '0.0.0.0' });
+await app.listen({ port: listenPort, host: '0.0.0.0' });
 
 declare module 'fastify' { interface FastifyRequest { user?: import('@supabase/supabase-js').User } }
