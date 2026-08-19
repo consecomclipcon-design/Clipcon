@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.js';
 import { downloadVideo, extractAudio, renderClip, readFileBuffer } from './media.js';
-import { transcribeAudio, analyzeTranscript } from './nvidia.js';
+import { transcribeAudio, analyzeTranscript } from './groq.js';
 import { uploadFileToDrive, uploadVideoToYouTube } from './google.js';
 
 export type Job = {
@@ -57,7 +57,7 @@ export async function handleTranscribe(supabase: SupabaseClient, job: Job) {
   if (error || !video?.audio_path) throw new Error('No audio available; re-run extraction stage');
   await setProgress(supabase, job, 30);
   const result = await transcribeAudio(video.audio_path);
-  const { data: tr, error: trErr } = await supabase.from('transcriptions').upsert({ tenant_id: job.tenant_id, source_video_id: video.id, language: 'pt-BR', model: config.NVIDIA_TRANSCRIPTION_MODEL ?? 'nvidia', status: 'completed' }, { onConflict: 'source_video_id' }).select('id').single();
+  const { data: tr, error: trErr } = await supabase.from('transcriptions').upsert({ tenant_id: job.tenant_id, source_video_id: video.id, language: 'pt-BR', model: config.GROQ_TRANSCRIPTION_MODEL ?? 'groq', status: 'completed' }, { onConflict: 'source_video_id' }).select('id').single();
   if (trErr) throw new Error('Could not save transcription: ' + trErr.message);
   const segRows = result.segments.filter(s => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start).map((s, i) => ({ tenant_id: job.tenant_id, transcription_id: tr.id, segment_index: i, start_seconds: s.start, end_seconds: s.end, text_content: s.text }));
   if (!segRows.length) throw new Error('Transcription produced no usable segments');
