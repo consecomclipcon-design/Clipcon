@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve, relative, sep } from 'node:path';
 import { config, listenPort } from './config.js';
 import { admin } from './supabase.js';
-import { createGoogleClient, encryptToken, googleConfigured, googleScopes, signOAuthState, verifyOAuthState } from './integrations/google.js';
+import { createGoogleClient, encryptToken, fetchAccountLabel, getProviderScopes, googleConfigured, signOAuthState, verifyOAuthState, type GoogleProvider } from './integrations/google.js';
 import { youtubeVideoId } from './youtube-url.js';
 
 const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie'] } });
@@ -68,20 +68,38 @@ app.get('/v1/master/metrics', async (request, reply) => {
 });
 app.get('/v1/integrations/google/start', async (request, reply) => {
   if (!googleConfigured()) return reply.code(503).send({ error: 'Google integration is not configured' });
-  const tenantId = (request.query as { tenant_id?: string }).tenant_id;
+  const query = request.query as { tenant_id?: string; provider?: string };
+  const tenantId = query.tenant_id;
+  const provider = query.provider as GoogleProvider | undefined;
   if (!tenantId) return reply.code(400).send({ error: 'tenant_id is required' });
+  if (provider !== 'drive' && provider !== 'youtube') return reply.code(400).send({ error: 'provider must be drive or youtube' });
   const { data: membership } = await admin.from('tenant_members').select('tenant_id').eq('tenant_id', tenantId).eq('user_id', request.user!.id).maybeSingle();
   if (!membership) return reply.code(403).send({ error: 'Tenant access required' });
   const client = createGoogleClient();
-  return { url: client.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: googleScopes, state: signOAuthState(request.user!.id, tenantId) }) };
+  return { url: client.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: getProviderScopes(provider), state: signOAuthState(request.user!.id, tenantId, provider) }) };
 });
 app.get('/v1/integrations/google/status', async (request, reply) => {
   const tenantId = (request.query as { tenant_id?: string }).tenant_id;
   if (!tenantId) return reply.code(400).send({ error: 'tenant_id is required' });
   const { data: membership } = await admin.from('tenant_members').select('tenant_id').eq('tenant_id', tenantId).eq('user_id', request.user!.id).maybeSingle();
   if (!membership) return reply.code(403).send({ error: 'Tenant access required' });
-  const { data: integration } = await admin.from('integrations').select('account_email, connected_at, last_error').eq('tenant_id', tenantId).eq('provider', 'google').maybeSingle();
-  return { configured: googleConfigured(), connected: Boolean(integration?.connected_at), accountEmail: integration?.account_email ?? null, lastError: integration?.last_error ?? null };
+  const { data: integrations } = await admin.from('integrations').select('provider, account_email, metadata, connected_at, last_error').eq('tenant_id', tenantId).in('provider', ['drive', 'youtube']);
+  const byProvider: Record<string, { accountEmail: string | null; accountLabel: string | null; lastError: string | null; connected: boolean }> = {};
+  for (const row of integrations ?? []) byProvider[row.provider] = { accountEmail: row.account_email ?? null, accountLabel: (row.metadata as { accountLabel?: string } | null)?.accountLabel ?? null, lastError: row.last_error ?? null, connected: Boolean(row.connected_at) };
+  const shape = (provider: string) => ({ configured: googleConfigured(), connected: Boolean(byProvider[provider]?.connected), accountEmail: byProvider[provider]?.accountEmail ?? null, accountLabel: byProvider[provider]?.accountLabel ?? null, lastError: byProvider[provider]?.lastError ?? null });
+  return { configured: googleConfigured(), drive: shape('drive'), youtube: shape('youtube') };
+});
+app.delete('/v1/integrations/google/disconnect', async (request, reply) => {
+  const query = request.query as { tenant_id?: string; provider?: string };
+  const tenantId = query.tenant_id;
+  const provider = query.provider as GoogleProvider | undefined;
+  if (!tenantId) return reply.code(400).send({ error: 'tenant_id is required' });
+  if (provider !== 'drive' && provider !== 'youtube') return reply.code(400).send({ error: 'provider must be drive or youtube' });
+  const { data: membership } = await admin.from('tenant_members').select('tenant_id').eq('tenant_id', tenantId).eq('user_id', request.user!.id).maybeSingle();
+  if (!membership) return reply.code(403).send({ error: 'Tenant access required' });
+  const { error } = await admin.from('integrations').delete().eq('tenant_id', tenantId).eq('provider', provider);
+  if (error) return reply.code(503).send({ error: 'Could not disconnect integration' });
+  return { ok: true };
 });
 app.get('/v1/integrations/google/callback', async (request, reply) => {
   const query = request.query as { code?: string; state?: string; error?: string };
@@ -91,10 +109,11 @@ app.get('/v1/integrations/google/callback', async (request, reply) => {
   if (!state) return reply.redirect(`${config.WEB_ORIGIN}/?google=expired`);
   const client = createGoogleClient();
   const { tokens } = await client.getToken(query.code);
-  if (!tokens.refresh_token && !tokens.access_token) return reply.redirect(`${config.WEB_ORIGIN}/?google=notokens`);
-  const { error } = await admin.from('integrations').upsert({ tenant_id: state.tenantId, provider: 'google', encrypted_access_token: tokens.access_token ? encryptToken(tokens.access_token) : null, encrypted_refresh_token: tokens.refresh_token ? encryptToken(tokens.refresh_token) : null, token_expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null, connected_at: new Date().toISOString(), last_error: null }, { onConflict: 'tenant_id,provider' });
-  if (error) return reply.redirect(`${config.WEB_ORIGIN}/?google=savefailed`);
-  return reply.redirect(`${config.WEB_ORIGIN}/?google=connected`);
+  if (!tokens.refresh_token && !tokens.access_token) return reply.redirect(`${config.WEB_ORIGIN}/?google=notokens&provider=${state.provider}`);
+  const account = tokens.access_token ? await fetchAccountLabel(state.provider, tokens.access_token) : { email: null, label: null, type: null };
+  const { error } = await admin.from('integrations').upsert({ tenant_id: state.tenantId, provider: state.provider, scopes: getProviderScopes(state.provider), account_email: account.email, encrypted_access_token: tokens.access_token ? encryptToken(tokens.access_token) : null, encrypted_refresh_token: tokens.refresh_token ? encryptToken(tokens.refresh_token) : null, token_expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null, connected_at: new Date().toISOString(), last_error: null, metadata: { accountLabel: account.label, accountType: account.type } }, { onConflict: 'tenant_id,provider' });
+  if (error) return reply.redirect(`${config.WEB_ORIGIN}/?google=savefailed&provider=${state.provider}`);
+  return reply.redirect(`${config.WEB_ORIGIN}/?google=connected&provider=${state.provider}`);
 });
 app.get('/*', async (request, reply) => {
   if (request.method !== 'GET' || request.url.startsWith('/v1/')) return reply.code(404).send({ error: 'Not found' });
