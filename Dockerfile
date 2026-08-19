@@ -21,6 +21,7 @@ COPY --from=build /app/apps/api/dist apps/api/dist
 COPY --from=build /app/apps/worker/package.json apps/worker/package.json
 COPY --from=build /app/apps/worker/dist apps/worker/dist
 COPY --from=build /app/apps/web/dist apps/web/dist
+COPY --from=build /app/apps/web/server.mjs apps/web/server.mjs
 COPY railway-entrypoint.sh ./railway-entrypoint.sh
 RUN chmod +x ./railway-entrypoint.sh
 EXPOSE 4000
