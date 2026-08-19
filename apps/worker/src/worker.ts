@@ -38,7 +38,7 @@ async function processNext() {
   if (error) throw error;
   if (!job || !job.id) return false;
   try { await execute(job); await update(job, { status: 'completed', progress: 100, completed_at: new Date().toISOString() }); }
-  catch (error) { const message = error instanceof Error ? error.message : 'Unknown worker error'; const retry = job.attempts < config.maxAttempts; const retryAt = new Date(Date.now() + Math.min(15 * 60_000, 2 ** job.attempts * 5_000)).toISOString(); await update(job, retry ? { status: 'queued', error_message: message, started_at: retryAt } : { status: 'failed', error_message: message, completed_at: new Date().toISOString() }); }
+  catch (error) { const message = error instanceof Error ? error.message : 'Unknown worker error'; const retry = job.attempts < config.maxAttempts; const retryAt = new Date(Date.now() + Math.min(15 * 60_000, 2 ** job.attempts * 5_000)).toISOString(); await update(job, retry ? { status: 'queued', error_message: message, started_at: retryAt } : { status: 'failed', error_message: message, completed_at: new Date().toISOString() }); if (!retry && job.source_video_id) await supabase.from('source_videos').update({ status: 'failed', updated_at: new Date().toISOString() }).eq('id', job.source_video_id); }
   return true;
 }
 

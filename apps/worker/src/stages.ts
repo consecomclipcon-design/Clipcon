@@ -34,7 +34,7 @@ export async function handleDownloadVideo(supabase: SupabaseClient, job: Job) {
   await setProgress(supabase, job, 10);
   const workDir = await mkdtemp(join(tmpdir(), 'clipcon-'));
   const path = await downloadVideo(video.source_url, workDir);
-  const { error: upErr } = await supabase.from('source_videos').update({ downloaded_path: path, updated_at: new Date().toISOString() }).eq('id', video.id);
+  const { error: upErr } = await supabase.from('source_videos').update({ downloaded_path: path, status: 'processing', updated_at: new Date().toISOString() }).eq('id', video.id);
   if (upErr) throw new Error('Could not save download path: ' + upErr.message);
   await supabase.from('processing_jobs').update({ artifacts: { ...job.artifacts, downloadedPath: path }, updated_at: new Date().toISOString() }).eq('id', job.id);
   await enqueueNext(supabase, job, 'extract_audio', video.id);
@@ -144,4 +144,6 @@ export async function handlePublishYoutube(supabase: SupabaseClient, job: Job) {
   if (upErr) throw new Error('Could not mark clip published: ' + upErr.message);
   const { error: pubErr } = await supabase.from('publications').insert({ tenant_id: job.tenant_id, clip_id: clipId, status: 'published', youtube_video_id: uploaded.id, published_at: new Date().toISOString() });
   if (pubErr) throw new Error('Could not save publication: ' + pubErr.message);
+  const { error: vidErr } = await supabase.from('source_videos').update({ status: 'completed', updated_at: new Date().toISOString() }).eq('id', job.source_video_id);
+  if (vidErr) throw new Error('Could not mark source video completed: ' + vidErr.message);
 }
