@@ -1,7 +1,11 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { config } from './config.js';
+import { probeMediaDuration, splitAudio } from './media.js';
 
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
+const CHUNK_SECONDS = 540;
 
 function requireGroqKey() {
   if (!config.GROQ_API_KEY) throw new Error('GROQ_API_KEY is not configured on the worker');
@@ -10,10 +14,7 @@ function requireGroqKey() {
 
 export type TranscriptSegment = { start: number; end: number; text: string };
 
-export async function transcribeAudio(filePath: string): Promise<{ text: string; segments: TranscriptSegment[] }> {
-  const key = requireGroqKey();
-  const model = config.GROQ_TRANSCRIPTION_MODEL;
-  if (!model) throw new Error('GROQ_TRANSCRIPTION_MODEL is not configured on the worker');
+async function transcribeOne(key: string, model: string, filePath: string): Promise<{ text: string; segments: TranscriptSegment[] }> {
   const file = await readFile(filePath);
   const form = new FormData();
   form.append('file', new Blob([file]), 'audio.mp3');
@@ -26,6 +27,28 @@ export async function transcribeAudio(filePath: string): Promise<{ text: string;
   if (!data.text && !data.segments?.length) throw new Error('Transcription returned no content');
   const segments = data.segments?.length ? data.segments : [{ start: 0, end: data.duration ?? 0, text: data.text ?? '' }];
   return { text: data.text ?? '', segments };
+}
+
+export async function transcribeAudio(filePath: string): Promise<{ text: string; segments: TranscriptSegment[] }> {
+  const key = requireGroqKey();
+  const model = config.GROQ_TRANSCRIPTION_MODEL;
+  if (!model) throw new Error('GROQ_TRANSCRIPTION_MODEL is not configured on the worker');
+  const duration = await probeMediaDuration(filePath);
+  if (duration <= CHUNK_SECONDS) return transcribeOne(key, model, filePath);
+  const workDir = await mkdtemp(join(tmpdir(), 'clipcon-'));
+  const chunks = await splitAudio(filePath, workDir, CHUNK_SECONDS);
+  const segments: TranscriptSegment[] = [];
+  const texts: string[] = [];
+  let offset = 0;
+  for (const chunk of chunks) {
+    const chunkDuration = await probeMediaDuration(chunk);
+    const result = await transcribeOne(key, model, chunk);
+    texts.push(result.text);
+    for (const s of result.segments) segments.push({ start: +(offset + s.start).toFixed(3), end: +(offset + s.end).toFixed(3), text: s.text });
+    offset += chunkDuration;
+  }
+  if (!segments.length) throw new Error('Transcription produced no segments');
+  return { text: texts.join('\n'), segments };
 }
 
 export type ClipCandidate = { start: number; end: number; title?: string; hook?: string; reason?: string; category?: string; score?: number; musicRisk?: number; contextRisk?: number };

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.js';
@@ -25,6 +25,20 @@ export async function downloadVideo(url: string, workDir: string): Promise<strin
   if (cookies) args.splice(2, 0, '--cookies', cookies);
   await execFileAsync('yt-dlp', args, { timeout: 15 * 60_000 });
   return out;
+}
+
+export async function probeMediaDuration(path: string): Promise<number> {
+  const { stdout } = await execFileAsync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', path], { timeout: 30_000 });
+  const value = Number.parseFloat(stdout.trim());
+  if (!Number.isFinite(value) || value <= 0) throw new Error('Could not probe media duration for ' + path);
+  return value;
+}
+
+export async function splitAudio(filePath: string, outDir: string, segmentSeconds: number): Promise<string[]> {
+  await execFileAsync('ffmpeg', ['-y', '-i', filePath, '-f', 'segment', '-segment_time', String(segmentSeconds), '-c', 'copy', join(outDir, 'audio-%03d.mp3')], { timeout: 10 * 60_000 });
+  const files = (await readdir(outDir)).filter(f => f.endsWith('.mp3')).sort();
+  if (!files.length) throw new Error('Audio splitting produced no chunks');
+  return files.map(f => join(outDir, f));
 }
 
 export async function extractAudio(videoPath: string, workDir: string): Promise<string> {
