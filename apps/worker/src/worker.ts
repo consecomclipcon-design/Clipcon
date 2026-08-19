@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createServer } from 'node:http';
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SECRET_KEY;
@@ -33,4 +34,7 @@ let stopping = false;
 process.on('SIGTERM', () => { stopping = true; });
 process.on('SIGINT', () => { stopping = true; });
 console.log('clipcon-worker ready');
+const healthServer = createServer((request, response) => { if (request.url === '/health') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ status: 'ok', service: 'clipcon-worker' })); return; } response.writeHead(404); response.end(); });
+healthServer.listen(Number(process.env.PORT ?? 4000), '0.0.0.0');
 while (!stopping) { try { const processed = await processNext(supabase); if (!processed) await new Promise(resolve => setTimeout(resolve, pollMs)); } catch (error) { console.error('worker loop error', error); await new Promise(resolve => setTimeout(resolve, Math.max(pollMs, 5000))); } }
+healthServer.close();
