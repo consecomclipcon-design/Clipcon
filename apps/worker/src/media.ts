@@ -1,13 +1,29 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { config } from './config.js';
 
 const execFileAsync = promisify(execFile);
 
+let cookiesPath: string | null | undefined;
+
+async function ensureCookiesFile() {
+  if (cookiesPath !== undefined) return cookiesPath;
+  const b64 = config.ytdlpCookiesB64;
+  if (!b64) return (cookiesPath = null);
+  cookiesPath = join(tmpdir(), 'ytdlp-cookies.txt');
+  await writeFile(cookiesPath, Buffer.from(b64, 'base64'));
+  return cookiesPath;
+}
+
 export async function downloadVideo(url: string, workDir: string): Promise<string> {
   const out = join(workDir, 'source.mp4');
-  await execFileAsync('yt-dlp', ['--no-playlist', '--retries', '3', '--fragment-retries', '5', '--js-runtimes', 'deno', '--extractor-args', 'youtube:player_client=ios,-android_sdkless,-web_safari', '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best', '--merge-output-format', 'mp4', '-o', out, url], { timeout: 15 * 60_000 });
+  const cookies = await ensureCookiesFile();
+  const args = ['--no-playlist', '--retries', '3', '--fragment-retries', '5', '--js-runtimes', 'deno', '--extractor-args', 'youtube:player_client=web_embedded,-android_sdkless,-web_safari', '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best', '--merge-output-format', 'mp4', '-o', out, url];
+  if (cookies) args.splice(2, 0, '--cookies', cookies);
+  await execFileAsync('yt-dlp', args, { timeout: 15 * 60_000 });
   return out;
 }
 

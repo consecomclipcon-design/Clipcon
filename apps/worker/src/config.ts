@@ -9,6 +9,7 @@ export const config = {
   NVIDIA_API_KEY: process.env.NVIDIA_API_KEY ?? null,
   NVIDIA_TRANSCRIPTION_MODEL: process.env.NVIDIA_TRANSCRIPTION_MODEL ?? null,
   NVIDIA_ANALYSIS_MODEL: process.env.NVIDIA_ANALYSIS_MODEL ?? null,
+  ytdlpCookiesB64: process.env.YTDLP_COOKIES ?? null,
   pollMs: Math.max(500, Number(process.env.WORKER_POLL_MS ?? 2000)),
   maxAttempts: Math.min(5, Math.max(1, Number(process.env.WORKER_MAX_ATTEMPTS ?? 5))),
 };
