@@ -6,6 +6,13 @@ import { probeMediaDuration, splitAudio } from './media.js';
 
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
 const CHUNK_SECONDS = 540;
+const MAX_ANALYZE_CHUNK_CHARS = 6000;
+const ANALYZE_OVERLAP_CHARS = 1000;
+const ANALYZE_CHUNK_DELAY_MS = 15000;
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function requireGroqKey() {
   if (!config.GROQ_API_KEY) throw new Error('GROQ_API_KEY is not configured on the worker');
@@ -65,30 +72,97 @@ function extractJsonArray(content: string): unknown {
   }
 }
 
-export async function analyzeTranscript(transcriptText: string): Promise<ClipCandidate[]> {
-  const key = requireGroqKey();
-  const model = config.GROQ_ANALYSIS_MODEL;
-  if (!model) throw new Error('GROQ_ANALYSIS_MODEL is not configured on the worker');
-  const res = await fetch(GROQ_BASE_URL + '/chat/completions', {
+function splitTranscript(text: string, maxChars: number, overlapChars: number): string[] {
+  const lines = text.split('\n');
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let currentLen = 0;
+  const flush = () => {
+    if (!current.length) return;
+    chunks.push(current.join('\n'));
+    const overlap: string[] = [];
+    let ol = 0;
+    for (let i = current.length - 1; i >= 0; i--) {
+      const ln = current[i];
+      if (ol + ln.length + 1 > overlapChars) break;
+      overlap.unshift(ln);
+      ol += ln.length + 1;
+    }
+    current = [...overlap];
+    currentLen = ol;
+  };
+  for (const line of lines) {
+    if (current.length && currentLen + line.length + 1 > maxChars) flush();
+    current.push(line);
+    currentLen += line.length + 1;
+  }
+  if (current.length) chunks.push(current.join('\n'));
+  return chunks;
+}
+
+function dedupeOverlapping(list: ClipCandidate[]): ClipCandidate[] {
+  const sorted = [...list].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const kept: ClipCandidate[] = [];
+  for (const c of sorted) {
+    const dup = kept.some(k => {
+      const inter = Math.max(0, Math.min(c.end, k.end) - Math.max(c.start, k.start));
+      const len = c.end - c.start;
+      return len > 0 && inter / len > 0.5;
+    });
+    if (!dup) kept.push(c);
+  }
+  return kept;
+}
+
+async function chatCompletion(key: string, body: Record<string, unknown>): Promise<string> {
+  let res = await fetch(GROQ_BASE_URL + '/chat/completions', {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: 'You are a viral, monetizable YouTube Shorts clip selector. You are given a transcript with timestamped segments ([start-end] text). Before choosing any timestamps, read the whole transcript and understand what is being said. Return an array of clip suggestions, each 60 to 90 seconds long (you may go up to 120 seconds only if the content is exceptional, and never choose 15-30 seconds just because it is easier). Choose clips that work completely on their own: start on a strong hook and end on a conclusion, punchline, reveal or strong phrase. Avoid segments that are predominantly music or instrumental, silent, intros, outros, greetings, cut-off mid-sentence, or that lack context. The 3 clips must cover 3 different moments of the video. Return ONLY valid JSON: an array of objects with keys start, end, title, hook, reason, category (tema), score (0-100), music_risk (0-100, how likely the segment is predominantly music), context_risk (0-100, how likely the segment lacks sufficient context). If you cannot find 3 good clips, return fewer - never invent timestamps.' },
-        { role: 'user', content: transcriptText },
-      ],
-      temperature: 0.3,
-      reasoning_effort: 'low',
-      include_reasoning: false,
-      max_completion_tokens: 1024,
-    }),
+    body: JSON.stringify(body),
   });
+  if (res.status === 429 || res.status === 413) {
+    await sleep(60_000);
+    res = await fetch(GROQ_BASE_URL + '/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
   if (!res.ok) throw new Error('Analysis failed: ' + res.status + ' ' + await res.text());
   const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
   const content = data.choices?.[0]?.message?.content;
   if (!content) throw new Error('Analysis returned no content');
+  return content;
+}
+
+async function analyzeChunk(key: string, model: string, chunk: string): Promise<ClipCandidate[]> {
+  const content = await chatCompletion(key, {
+    model,
+    messages: [
+      { role: 'system', content: 'You are a viral, monetizable YouTube Shorts clip selector. You are given part of a transcript with timestamped segments ([start-end] text). Before choosing any timestamps, read the whole chunk and understand what is being said. Return up to 3 clip suggestions, each 60 to 90 seconds long (you may go up to 120 seconds only if the content is exceptional, and never choose 15-30 seconds just because it is easier). Choose clips that work completely on their own: start on a strong hook and end on a conclusion, punchline, reveal or strong phrase. Avoid segments that are predominantly music or instrumental, silent, intros, outros, greetings, cut-off mid-sentence, or that lack context. Prefer different moments within this chunk. Return ONLY valid JSON: an array of objects with keys start, end, title, hook, reason, category (tema), score (0-100), music_risk (0-100, how likely the segment is predominantly music), context_risk (0-100, how likely the segment lacks sufficient context). If there are no good clips in this chunk, return an empty array - never invent timestamps.' },
+      { role: 'user', content: chunk },
+    ],
+    temperature: 0.3,
+    reasoning_effort: 'low',
+    include_reasoning: false,
+    max_completion_tokens: 1024,
+  });
   const parsed = extractJsonArray(content);
-  if (!Array.isArray(parsed)) throw new Error('Analysis did not return an array of clips');
+  if (!Array.isArray(parsed)) return [];
   return parsed as ClipCandidate[];
+}
+
+export async function analyzeTranscript(transcriptText: string): Promise<ClipCandidate[]> {
+  const key = requireGroqKey();
+  const model = config.GROQ_ANALYSIS_MODEL;
+  if (!model) throw new Error('GROQ_ANALYSIS_MODEL is not configured on the worker');
+  const chunks = splitTranscript(transcriptText, MAX_ANALYZE_CHUNK_CHARS, ANALYZE_OVERLAP_CHARS);
+  const all: ClipCandidate[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const found = await analyzeChunk(key, model, chunks[i]);
+    all.push(...found);
+    if (i < chunks.length - 1) await sleep(ANALYZE_CHUNK_DELAY_MS);
+  }
+  if (!all.length) throw new Error('Analysis produced no candidates across transcript chunks');
+  return dedupeOverlapping(all).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 }
