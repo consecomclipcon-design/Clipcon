@@ -1,13 +1,14 @@
 import { StrictMode, useEffect, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Session } from '@supabase/supabase-js';
-import { supabase } from './lib/supabase';
-import { publicConfig } from './config';
+import { createSupabaseClient } from './lib/supabase';
+import { loadPublicConfig } from './config';
 import './styles.css';
 
 type Tenant = { id: string; name: string; slug: string; status: string };
 type Project = { id: string; name: string; status: string; created_at: string };
-const apiUrl = publicConfig.apiUrl ?? '';
+let supabase: ReturnType<typeof createSupabaseClient> = null;
+let apiUrl = '';
 
 function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -29,4 +30,14 @@ function App() {
   if (!tenant) return <main className="auth"><form className="card login" onSubmit={createWorkspace}><span className="eyebrow">FIRST WORKSPACE</span><h2>Crie seu workspace</h2><p className="muted">Um workspace mantém seus projetos e arquivos isolados.</p><label>Nome<input required value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} placeholder="Minha produtora" /></label><label>Slug<input required value={workspaceSlug} onChange={event => setWorkspaceSlug(event.target.value)} placeholder="minha-produtora" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" /></label>{error && <div className="error">{error}</div>}<button disabled={busy} type="submit">Criar workspace <span>↗</span></button></form></main>;
   return <main className="app"><header><div className="brand"><b>CLIP</b>CON</div><div><span className="workspace-label">{tenant.name}</span><div className="avatar">{session.user.email?.[0]?.toUpperCase()}</div></div></header><section className="welcome"><span className="eyebrow">OVERVIEW / {tenant.slug.toUpperCase()}</span><h1>Seu conteúdo, em movimento.</h1><p>O próximo corte começa com uma boa conversa.</p><div className="grid"><div className="card metric"><span className="muted">Projetos ativos</span><strong>{projects.filter(project => project.status === 'active').length}</strong><small>Projetos neste workspace</small></div><div className="card metric"><span className="muted">Cortes gerados</span><strong>0</strong><small>Os resultados aparecerão aqui</small></div><div className="card metric accent"><span className="muted">Pipeline</span><strong>Pronto</strong><small>Jobs acompanham progresso em tempo real</small></div></div><div className="section-heading"><div><span className="eyebrow">PROJECTS</span><h2>Seus projetos</h2></div><button onClick={() => setShowProjectForm(true)}>Novo projeto <span>＋</span></button></div>{showProjectForm && <form className="card project-form" onSubmit={createProject}><label>Nome do projeto<input required value={projectName} onChange={event => setProjectName(event.target.value)} placeholder="Podcast Ep. 42" /></label><label>URL do YouTube<input required type="url" value={sourceUrl} onChange={event => setSourceUrl(event.target.value)} placeholder="https://youtube.com/watch?v=..." /></label>{error && <div className="error">{error}</div>}<button disabled={busy} type="submit">Enfileirar processamento <span>↗</span></button></form>}{projects.length === 0 && !showProjectForm ? <div className="card empty"><div className="play">✦</div><h2>Crie seu primeiro projeto</h2><p>Insira um vídeo longo do YouTube para iniciar o pipeline.</p><button onClick={() => setShowProjectForm(true)}>Começar agora <span>↗</span></button></div> : <div className="project-list">{projects.map(project => <article className="card project" key={project.id}><div className="play">◌</div><div><h3>{project.name}</h3><span className="muted">{project.status === 'active' ? 'Processamento pronto para iniciar' : 'Arquivado'}</span></div><span className="status">{project.status}</span></article>)}</div>}</section></main>;
 }
-createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
+async function bootstrap() {
+  try {
+    const publicConfig = await loadPublicConfig();
+    supabase = createSupabaseClient(publicConfig);
+    apiUrl = publicConfig.apiUrl ?? '';
+    createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
+  } catch {
+    document.getElementById('root')!.innerHTML = '<main class="auth"><section class="card login"><span class="eyebrow">CONFIGURATION ERROR</span><h2>Não foi possível carregar o workspace.</h2><p class="muted">A configuração pública do ClipCon não está disponível no momento.</p></section></main>';
+  }
+}
+bootstrap();
