@@ -21,19 +21,45 @@ function requireGroqKey() {
 
 export type TranscriptSegment = { start: number; end: number; text: string };
 
+function extractRetrySeconds(res: Response, bodyText: string): number {
+  const retryAfter = res.headers.get('retry-after');
+  if (retryAfter) {
+    const s = Number.parseInt(retryAfter, 10);
+    if (Number.isFinite(s) && s > 0) return s;
+  }
+  const m = bodyText.match(/try again in (?:(\d+)m ?)?(\d+(?:\.\d+)?)s/i);
+  if (m) {
+    const minutes = m[1] ? Number.parseInt(m[1], 10) : 0;
+    const seconds = Number.parseFloat(m[2]);
+    if (Number.isFinite(seconds)) return minutes * 60 + seconds;
+  }
+  return 30;
+}
+
 async function transcribeOne(key: string, model: string, filePath: string): Promise<{ text: string; segments: TranscriptSegment[] }> {
   const file = await readFile(filePath);
-  const form = new FormData();
-  form.append('file', new Blob([file]), 'audio.mp3');
-  form.append('model', model);
-  form.append('response_format', 'verbose_json');
-  form.append('timestamp_granularities[]', 'segment');
-  const res = await fetch(GROQ_BASE_URL + '/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + key }, body: form });
-  if (!res.ok) throw new Error('Transcription failed: ' + res.status + ' ' + await res.text());
-  const data = (await res.json()) as { text?: string; duration?: number; segments?: Array<{ start: number; end: number; text: string }> };
-  if (!data.text && !data.segments?.length) throw new Error('Transcription returned no content');
-  const segments = data.segments?.length ? data.segments : [{ start: 0, end: data.duration ?? 0, text: data.text ?? '' }];
-  return { text: data.text ?? '', segments };
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const form = new FormData();
+    form.append('file', new Blob([file]), 'audio.mp3');
+    form.append('model', model);
+    form.append('response_format', 'verbose_json');
+    form.append('timestamp_granularities[]', 'segment');
+    const res = await fetch(GROQ_BASE_URL + '/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + key }, body: form });
+    if (res.ok) {
+      const data = (await res.json()) as { text?: string; duration?: number; segments?: Array<{ start: number; end: number; text: string }> };
+      if (!data.text && !data.segments?.length) throw new Error('Transcription returned no content');
+      const segments = data.segments?.length ? data.segments : [{ start: 0, end: data.duration ?? 0, text: data.text ?? '' }];
+      return { text: data.text ?? '', segments };
+    }
+    const bodyText = await res.text();
+    if (res.status === 429 || res.status === 413) {
+      const wait = extractRetrySeconds(res, bodyText) + 5;
+      await sleep(wait * 1000);
+      continue;
+    }
+    throw new Error('Transcription failed: ' + res.status + ' ' + bodyText);
+  }
+  throw new Error('Transcription rate-limited after retries');
 }
 
 export async function transcribeAudio(filePath: string): Promise<{ text: string; segments: TranscriptSegment[] }> {
