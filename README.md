@@ -18,7 +18,7 @@ Para criar o Master Admin, configure `BOOTSTRAP_MASTER_EMAIL` e `BOOTSTRAP_MASTE
 
 ## Railway
 
-Configure três serviços apontando para este repositório: API usando `Dockerfile.api` na porta `4000`, worker usando `Dockerfile.worker` e web usando `Dockerfile.web` na porta `80`. Configure as variáveis de cada serviço no painel do Railway; nunca coloque secrets no repositório. A API deve usar o domínio público do web em `WEB_ORIGIN` e o web deve apontar `VITE_API_URL` para a API.
+O serviço `Clipcon` usa `railway.toml` + `Dockerfile` para servir Web e API no mesmo domínio, com `/health` como healthcheck. O Worker deve ser criado como serviço separado usando `Dockerfile.worker`, sem expor porta pública. Configure as variáveis de cada serviço no painel do Railway; nunca coloque secrets no repositório.
 
 ## Incidente de credenciais
 
