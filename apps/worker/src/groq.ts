@@ -28,7 +28,7 @@ export async function transcribeAudio(filePath: string): Promise<{ text: string;
   return { text: data.text ?? '', segments };
 }
 
-export type ClipCandidate = { start: number; end: number; title?: string; hook?: string; reason?: string; category?: string; score?: number };
+export type ClipCandidate = { start: number; end: number; title?: string; hook?: string; reason?: string; category?: string; score?: number; musicRisk?: number; contextRisk?: number };
 
 function extractJsonArray(content: string): unknown {
   const cleaned = content.replace(/```json\s*/g, '').replace(/```/g, '').trim();
@@ -52,7 +52,7 @@ export async function analyzeTranscript(transcriptText: string): Promise<ClipCan
     body: JSON.stringify({
       model,
       messages: [
-        { role: 'system', content: 'You are a viral Shorts clip selector. Given a transcript with timestamped segments, choose the 3 best segments of 15 to 60 seconds each. Return ONLY valid JSON: an array of objects with keys start, end, title, hook, reason, category, score (0-100).' },
+        { role: 'system', content: 'You are a viral, monetizable YouTube Shorts clip selector. You are given a transcript with timestamped segments ([start-end] text). Before choosing any timestamps, read the whole transcript and understand what is being said. Return an array of clip suggestions, each 60 to 90 seconds long (you may go up to 120 seconds only if the content is exceptional, and never choose 15-30 seconds just because it is easier). Choose clips that work completely on their own: start on a strong hook and end on a conclusion, punchline, reveal or strong phrase. Avoid segments that are predominantly music or instrumental, silent, intros, outros, greetings, cut-off mid-sentence, or that lack context. The 3 clips must cover 3 different moments of the video. Return ONLY valid JSON: an array of objects with keys start, end, title, hook, reason, category (tema), score (0-100), music_risk (0-100, how likely the segment is predominantly music), context_risk (0-100, how likely the segment lacks sufficient context). If you cannot find 3 good clips, return fewer - never invent timestamps.' },
         { role: 'user', content: transcriptText },
       ],
       temperature: 0.3,

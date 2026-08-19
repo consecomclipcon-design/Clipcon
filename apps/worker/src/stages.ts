@@ -77,9 +77,12 @@ export async function handleAnalyze(supabase: SupabaseClient, job: Job) {
   const candidates = await analyzeTranscript(transcriptText);
   const rows = candidates.filter(c => Number.isFinite(c.start) && Number.isFinite(c.end)).map(c => {
     const start = Math.max(0, c.start);
-    const end = Math.min(c.end, start + 60);
+    const end = Math.min(c.end, start + 120);
     if (end <= start) return null;
-    return { tenant_id: job.tenant_id, project_id: job.project_id, source_video_id: job.source_video_id, start_seconds: start, end_seconds: end, score: Math.min(100, Math.max(0, Math.round(c.score ?? 50))), title: c.title ?? 'Clip', reason: c.reason ?? null, hook: c.hook ?? null, category: c.category ?? null, status: 'candidate' };
+    const score = Math.min(100, Math.max(0, Math.round(c.score ?? 50)));
+    const musicRisk = c.musicRisk !== undefined && Number.isFinite(c.musicRisk) ? Math.min(100, Math.max(0, Math.round(c.musicRisk))) : null;
+    const contextRisk = c.contextRisk !== undefined && Number.isFinite(c.contextRisk) ? Math.min(100, Math.max(0, Math.round(c.contextRisk))) : null;
+    return { tenant_id: job.tenant_id, project_id: job.project_id, source_video_id: job.source_video_id, start_seconds: start, end_seconds: end, score, title: c.title ?? 'Clip', reason: c.reason ?? null, hook: c.hook ?? null, category: c.category ?? null, music_risk: musicRisk, context_risk: contextRisk, status: 'candidate' };
   }).filter((row): row is NonNullable<typeof row> => row !== null);
   if (!rows.length) throw new Error('Analysis produced no usable candidates');
   const { error: insErr } = await supabase.from('clip_candidates').insert(rows);
@@ -89,10 +92,27 @@ export async function handleAnalyze(supabase: SupabaseClient, job: Job) {
 }
 
 export async function handleSelectClips(supabase: SupabaseClient, job: Job) {
-  const { data: candidates } = await supabase.from('clip_candidates').select('id, start_seconds, end_seconds, score, title, reason, hook, category').eq('source_video_id', job.source_video_id).order('score', { ascending: false });
+  const { data: candidates } = await supabase.from('clip_candidates').select('id, start_seconds, end_seconds, score, title, reason, hook, category, music_risk, context_risk').eq('source_video_id', job.source_video_id).order('score', { ascending: false });
   if (!candidates?.length) throw new Error('No clip candidates available; re-run analyze stage');
-  const selected = candidates.filter(c => (c.end_seconds - c.start_seconds) >= 15 && (c.end_seconds - c.start_seconds) <= 60).slice(0, 3);
-  if (!selected.length) throw new Error('No candidates fit the 15-60s Short duration window');
+  const usable = candidates.filter(c => {
+    const duration = c.end_seconds - c.start_seconds;
+    if (!(duration >= 45 && duration <= 120)) return false;
+    if (c.music_risk != null && c.music_risk >= 70) return false;
+    if (c.context_risk != null && c.context_risk >= 70) return false;
+    return true;
+  });
+  const preferred = usable.filter(c => { const d = c.end_seconds - c.start_seconds; return d >= 60 && d <= 90; });
+  const fallback = usable.filter(c => !preferred.includes(c) && (c.score ?? 0) >= 85);
+  const ranked = [...preferred, ...fallback].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  const selected: typeof ranked = [];
+  let lastEnd = Number.NEGATIVE_INFINITY;
+  for (const c of ranked) {
+    if (c.start_seconds < lastEnd - 10) continue;
+    selected.push(c);
+    lastEnd = Math.max(lastEnd, c.end_seconds);
+    if (selected.length >= 3) break;
+  }
+  if (!selected.length) throw new Error('No candidates fit the monetizable 60-90s Shorts window (only ' + usable.length + ' usable, none acceptable)');
   const clipRows = selected.map(c => ({ tenant_id: job.tenant_id, project_id: job.project_id, candidate_id: c.id, title: c.title ?? 'Clip', description: c.reason ?? '', hashtags: [], status: 'draft' }));
   const { data: clips, error: insErr } = await supabase.from('clips').insert(clipRows).select('id');
   if (insErr) throw new Error('Could not save clips: ' + insErr.message);
