@@ -21,7 +21,7 @@ async function ensureCookiesFile() {
 export async function downloadVideo(url: string, workDir: string): Promise<string> {
   const out = join(workDir, 'source.mp4');
   const cookies = await ensureCookiesFile();
-  const args = ['--no-playlist', '--retries', '3', '--fragment-retries', '5', '--js-runtimes', 'deno', '--extractor-args', 'youtube:player_client=web_embedded,-android_sdkless,-web_safari', '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best', '--merge-output-format', 'mp4', '-o', out, url];
+  const args = ['--no-playlist', '--retries', '3', '--fragment-retries', '5', '--js-runtimes', 'deno', '--remote-components', 'ejs:github', '--extractor-args', 'youtube:player_client=web_embedded,-android_sdkless,-web_safari', '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best', '--merge-output-format', 'mp4', '-o', out, url];
   if (cookies) args.splice(2, 0, '--cookies', cookies);
   await execFileAsync('yt-dlp', args, { timeout: 15 * 60_000 });
   return out;
