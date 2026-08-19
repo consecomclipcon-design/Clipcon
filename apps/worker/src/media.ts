@@ -7,6 +7,12 @@ import { config } from './config.js';
 
 const execFileAsync = promisify(execFile);
 
+const BOT_CHECK_PATTERNS = [/confirm you're not a bot/i, /Sign in to confirm/i, /HTTP Error 429/i];
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 let cookiesPath: string | null | undefined;
 
 async function ensureCookiesFile() {
@@ -21,10 +27,30 @@ async function ensureCookiesFile() {
 export async function downloadVideo(url: string, workDir: string): Promise<string> {
   const out = join(workDir, 'source.mp4');
   const cookies = await ensureCookiesFile();
-  const args = ['--no-playlist', '--retries', '3', '--fragment-retries', '5', '--js-runtimes', 'deno', '--remote-components', 'ejs:github', '--extractor-args', 'youtube:player_client=ios,web_embedded,-android_sdkless,-web_safari', '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best', '--merge-output-format', 'mp4', '-o', out, url];
-  if (cookies) args.splice(-1, 0, '--cookies', cookies);
-  await execFileAsync('yt-dlp', args, { timeout: 15 * 60_000 });
-  return out;
+  const args = [
+    '--no-playlist', '--retries', '3', '--fragment-retries', '5',
+    '--js-runtimes', 'deno', '--remote-components', 'ejs:github',
+    '--extractor-args', 'youtube:player_client=web_safari,web_embedded,tv_embedded',
+    '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
+    '--merge-output-format', 'mp4', '-o', out,
+  ];
+  if (cookies) args.push('--cookies', cookies);
+  args.push(url);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await execFileAsync('yt-dlp', args, { timeout: 15 * 60_000 });
+      return out;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const botBlocked = BOT_CHECK_PATTERNS.some(p => p.test(msg));
+      if (botBlocked && attempt < 2) {
+        await sleep(10 * 60_000);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Download failed after retries');
 }
 
 export async function probeMediaDuration(path: string): Promise<number> {

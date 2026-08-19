@@ -38,7 +38,7 @@ function extractRetrySeconds(res: Response, bodyText: string): number {
 
 async function transcribeOne(key: string, model: string, filePath: string): Promise<{ text: string; segments: TranscriptSegment[] }> {
   const file = await readFile(filePath);
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < 12; attempt++) {
     const form = new FormData();
     form.append('file', new Blob([file]), 'audio.mp3');
     form.append('model', model);
@@ -53,7 +53,7 @@ async function transcribeOne(key: string, model: string, filePath: string): Prom
     }
     const bodyText = await res.text();
     if (res.status === 429 || res.status === 413) {
-      const wait = extractRetrySeconds(res, bodyText) + 5;
+      const wait = Math.min(extractRetrySeconds(res, bodyText) + 5, 3600);
       await sleep(wait * 1000);
       continue;
     }
