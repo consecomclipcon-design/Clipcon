@@ -11,6 +11,7 @@ const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.heade
 await app.register(cors, { origin: config.WEB_ORIGIN });
 const webRoot = resolve(new URL('../../web/dist', import.meta.url).pathname);
 app.get('/health', async () => ({ status: 'ok', service: 'clipcon-api' }));
+app.get('/config.js', async (_request, reply) => reply.type('text/javascript; charset=utf-8').header('cache-control', 'no-store').send(`window.__CLIPCON_CONFIG__=${JSON.stringify({ supabaseUrl: process.env.VITE_SUPABASE_URL, supabasePublishableKey: process.env.VITE_SUPABASE_PUBLISHABLE_KEY, apiUrl: process.env.VITE_API_URL })};`));
 app.addHook('onRequest', async (request, reply) => {
   if (request.url === '/health') return;
   const authorization = request.headers.authorization;

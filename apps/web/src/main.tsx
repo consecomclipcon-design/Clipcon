@@ -2,11 +2,12 @@ import { StrictMode, useEffect, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './lib/supabase';
+import { publicConfig } from './config';
 import './styles.css';
 
 type Tenant = { id: string; name: string; slug: string; status: string };
 type Project = { id: string; name: string; status: string; created_at: string };
-const apiUrl = (import.meta.env.VITE_API_URL as string | undefined) ?? '';
+const apiUrl = publicConfig.apiUrl ?? '';
 
 function App() {
   const [session, setSession] = useState<Session | null>(null);

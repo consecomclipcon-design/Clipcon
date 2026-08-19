@@ -7,6 +7,7 @@ const root = resolve(fileURLToPath(new URL('./dist', import.meta.url)));
 const types = { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', svg: 'image/svg+xml', png: 'image/png', webp: 'image/webp' };
 const server = createServer(async (request, response) => {
   if (request.url === '/health') { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ status: 'ok', service: 'clipcon-web' })); return; }
+  if (request.url === '/config.js') { const config = { supabaseUrl: process.env.VITE_SUPABASE_URL, supabasePublishableKey: process.env.VITE_SUPABASE_PUBLISHABLE_KEY, apiUrl: process.env.VITE_API_URL }; response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' }); response.end(`window.__CLIPCON_CONFIG__=${JSON.stringify(config)};`); return; }
   const pathname = decodeURIComponent((request.url ?? '/').split('?')[0]);
   const candidate = resolve(root, pathname === '/' ? 'index.html' : pathname.slice(1));
   const inside = relative(root, candidate);
