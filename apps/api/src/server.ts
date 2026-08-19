@@ -13,7 +13,7 @@ const webRoot = resolve(new URL('../../web/dist', import.meta.url).pathname);
 app.get('/health', async () => ({ status: 'ok', service: 'clipcon-api' }));
 app.get('/config.js', async (_request, reply) => reply.type('text/javascript; charset=utf-8').header('cache-control', 'no-store').send(`window.__CLIPCON_CONFIG__=${JSON.stringify({ supabaseUrl: process.env.VITE_SUPABASE_URL, supabasePublishableKey: process.env.VITE_SUPABASE_PUBLISHABLE_KEY, apiUrl: process.env.VITE_API_URL })};`));
 app.addHook('onRequest', async (request, reply) => {
-  if (request.url === '/health') return;
+  if (request.url === '/health' || request.url.startsWith('/v1/integrations/google/callback')) return;
   const authorization = request.headers.authorization;
   if (!authorization?.startsWith('Bearer ')) return reply.code(401).send({ error: 'Authentication required' });
   const { data, error } = await admin.auth.getUser(authorization.slice(7));
@@ -73,19 +73,27 @@ app.get('/v1/integrations/google/start', async (request, reply) => {
   const { data: membership } = await admin.from('tenant_members').select('tenant_id').eq('tenant_id', tenantId).eq('user_id', request.user!.id).maybeSingle();
   if (!membership) return reply.code(403).send({ error: 'Tenant access required' });
   const client = createGoogleClient();
-  return reply.redirect(client.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: googleScopes, state: signOAuthState(request.user!.id, tenantId) }));
+  return { url: client.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: googleScopes, state: signOAuthState(request.user!.id, tenantId) }) };
+});
+app.get('/v1/integrations/google/status', async (request, reply) => {
+  const tenantId = (request.query as { tenant_id?: string }).tenant_id;
+  if (!tenantId) return reply.code(400).send({ error: 'tenant_id is required' });
+  const { data: membership } = await admin.from('tenant_members').select('tenant_id').eq('tenant_id', tenantId).eq('user_id', request.user!.id).maybeSingle();
+  if (!membership) return reply.code(403).send({ error: 'Tenant access required' });
+  const { data: integration } = await admin.from('integrations').select('account_email, connected_at, last_error').eq('tenant_id', tenantId).eq('provider', 'google').maybeSingle();
+  return { configured: googleConfigured(), connected: Boolean(integration?.connected_at), accountEmail: integration?.account_email ?? null, lastError: integration?.last_error ?? null };
 });
 app.get('/v1/integrations/google/callback', async (request, reply) => {
   const query = request.query as { code?: string; state?: string; error?: string };
-  if (query.error) return reply.code(400).send({ error: 'Google authorization was denied' });
-  if (!query.code || !query.state) return reply.code(400).send({ error: 'Invalid OAuth callback' });
+  if (query.error) return reply.redirect(`${config.WEB_ORIGIN}/?google=denied`);
+  if (!query.code || !query.state) return reply.redirect(`${config.WEB_ORIGIN}/?google=invalid`);
   const state = verifyOAuthState(query.state);
-  if (!state) return reply.code(400).send({ error: 'Expired or invalid OAuth state' });
+  if (!state) return reply.redirect(`${config.WEB_ORIGIN}/?google=expired`);
   const client = createGoogleClient();
   const { tokens } = await client.getToken(query.code);
-  if (!tokens.refresh_token && !tokens.access_token) return reply.code(400).send({ error: 'Google did not return usable tokens' });
+  if (!tokens.refresh_token && !tokens.access_token) return reply.redirect(`${config.WEB_ORIGIN}/?google=notokens`);
   const { error } = await admin.from('integrations').upsert({ tenant_id: state.tenantId, provider: 'google', encrypted_access_token: tokens.access_token ? encryptToken(tokens.access_token) : null, encrypted_refresh_token: tokens.refresh_token ? encryptToken(tokens.refresh_token) : null, token_expires_at: tokens.expiry_date ? new Date(tokens.expiry_date).toISOString() : null, connected_at: new Date().toISOString(), last_error: null }, { onConflict: 'tenant_id,provider' });
-  if (error) return reply.code(503).send({ error: 'Could not save Google integration' });
+  if (error) return reply.redirect(`${config.WEB_ORIGIN}/?google=savefailed`);
   return reply.redirect(`${config.WEB_ORIGIN}/?google=connected`);
 });
 app.get('/*', async (request, reply) => {
