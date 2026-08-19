@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 
 export async function downloadVideo(url: string, workDir: string): Promise<string> {
   const out = join(workDir, 'source.mp4');
-  await execFileAsync('yt-dlp', ['--no-playlist', '-f', 'bestvideo[height<=1080]+bestaudio/bestvideo[height<=1080]/best[height<=1080]/best', '--merge-output-format', 'mp4', '-o', out, url], { timeout: 15 * 60_000 });
+  await execFileAsync('yt-dlp', ['--no-playlist', '--retries', '3', '--js-runtimes', 'deno', '--extractor-args', 'youtube:player_client=default,-android_sdkless,-web_safari', '-f', 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best', '--merge-output-format', 'mp4', '-o', out, url], { timeout: 15 * 60_000 });
   return out;
 }
 
