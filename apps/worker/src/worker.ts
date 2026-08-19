@@ -24,7 +24,7 @@ async function processNext(client: SupabaseClient) {
   const error = result.error;
   const job = result.data as unknown as Job | null;
   if (error) throw error;
-  if (!job) return false;
+  if (!job || !job.id) return false;
   try { await execute(job); await update(job, { status: 'completed', progress: 100, completed_at: new Date().toISOString() }); }
   catch (error) { const message = error instanceof Error ? error.message : 'Unknown worker error'; const retry = job.attempts < maxAttempts; const retryAt = new Date(Date.now() + Math.min(15 * 60_000, 2 ** job.attempts * 5_000)).toISOString(); await update(job, retry ? { status: 'queued', error_message: message, started_at: retryAt } : { status: 'failed', error_message: message, completed_at: new Date().toISOString() }); }
   return true;
