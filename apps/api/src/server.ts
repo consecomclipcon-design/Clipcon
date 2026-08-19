@@ -47,7 +47,7 @@ app.post('/v1/projects', async (request, reply) => {
   const { data: project, error: projectError } = await admin.from('projects').insert({ tenant_id: tenantId, name, created_by: request.user!.id }).select('id, tenant_id, name, status, created_at').single();
   if (projectError) return reply.code(400).send({ error: 'Could not create project' });
   const { data: video, error: videoError } = await admin.from('source_videos').insert({ tenant_id: tenantId, project_id: project.id, youtube_video_id: videoId, source_url: sourceUrl }).select('id, status').single();
-  if (videoError) { await admin.from('projects').delete().eq('id', project.id); return reply.code(400).send({ error: 'Could not register source video' }); }
+  if (videoError) { await admin.from('projects').delete().eq('id', project.id); return reply.code(videoError.code === '23505' ? 409 : 400).send({ error: videoError.code === '23505' ? 'This video is already registered in this workspace' : 'Could not register source video' }); }
   const { error: jobError } = await admin.from('processing_jobs').insert({ tenant_id: tenantId, project_id: project.id, source_video_id: video.id, type: 'download_video' });
   if (jobError) { await admin.from('projects').delete().eq('id', project.id); return reply.code(503).send({ error: 'Could not enqueue processing job' }); }
   return reply.code(201).send({ project, video });
