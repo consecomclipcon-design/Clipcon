@@ -137,14 +137,12 @@ app.post("/v1/tenants", async (request, reply) => {
       .code(500)
       .send({ error: "Could not create workspace configuration" });
   }
-  await admin
-    .from("workspace_members")
-    .insert({
-      workspace_id: workspace.id,
-      tenant_id: tenant.id,
-      user_id: request.user!.id,
-      role: "owner",
-    });
+  await admin.from("workspace_members").insert({
+    workspace_id: workspace.id,
+    tenant_id: tenant.id,
+    user_id: request.user!.id,
+    role: "owner",
+  });
   await admin
     .from("brand_kits")
     .insert({ tenant_id: tenant.id, workspace_id: workspace.id });
@@ -161,6 +159,13 @@ async function getWorkspaceForUser(workspaceId: string, userId: string) {
     .maybeSingle();
   if (!data || !(await hasTenantMembership(userId, data.tenant_id)))
     return null;
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("workspace_id")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (!member) return null;
   return data;
 }
 
@@ -210,14 +215,12 @@ app.post("/v1/workspaces", async (request, reply) => {
     return reply
       .code(error.code === "23505" ? 409 : 400)
       .send({ error: "Could not create workspace" });
-  await admin
-    .from("workspace_members")
-    .insert({
-      workspace_id: data.id,
-      tenant_id: body.tenant_id,
-      user_id: request.user!.id,
-      role: "owner",
-    });
+  await admin.from("workspace_members").insert({
+    workspace_id: data.id,
+    tenant_id: body.tenant_id,
+    user_id: request.user!.id,
+    role: "owner",
+  });
   await admin
     .from("brand_kits")
     .insert({ tenant_id: body.tenant_id, workspace_id: data.id });
@@ -394,28 +397,24 @@ app.post(
     if (!body.api_key?.trim())
       return reply.code(400).send({ error: "API key is required" });
     try {
-      return reply
-        .code(201)
-        .send(
-          await saveProviderKey({
-            tenantId: workspace.tenant_id,
-            workspaceId: workspace.id,
-            userId: request.user!.id,
-            provider,
-            secret: body.api_key.trim(),
-            defaultModel: body.default_model,
-            capabilities: body.capabilities,
-          }),
-        );
+      return reply.code(201).send(
+        await saveProviderKey({
+          tenantId: workspace.tenant_id,
+          workspaceId: workspace.id,
+          userId: request.user!.id,
+          provider,
+          secret: body.api_key.trim(),
+          defaultModel: body.default_model,
+          capabilities: body.capabilities,
+        }),
+      );
     } catch (error) {
-      return reply
-        .code(400)
-        .send({
-          error:
-            error instanceof Error
-              ? error.message
-              : "Could not validate provider key",
-        });
+      return reply.code(400).send({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not validate provider key",
+      });
     }
   },
 );
@@ -455,11 +454,9 @@ app.post("/v1/projects", async (request, reply) => {
   const name = body?.name?.trim();
   const videoId = sourceUrl ? youtubeVideoId(sourceUrl) : null;
   if (!tenantId || !sourceUrl || !name || !videoId)
-    return reply
-      .code(400)
-      .send({
-        error: "Project name, tenant and valid YouTube URL are required",
-      });
+    return reply.code(400).send({
+      error: "Project name, tenant and valid YouTube URL are required",
+    });
   const { data: membership } = await admin
     .from("tenant_members")
     .select("tenant_id")
@@ -515,23 +512,19 @@ app.post("/v1/projects", async (request, reply) => {
     .single();
   if (videoError) {
     await admin.from("projects").delete().eq("id", project.id);
-    return reply
-      .code(videoError.code === "23505" ? 409 : 400)
-      .send({
-        error:
-          videoError.code === "23505"
-            ? "This video is already registered in this workspace"
-            : "Could not register source video",
-      });
-  }
-  const { error: jobError } = await admin
-    .from("processing_jobs")
-    .insert({
-      tenant_id: tenantId,
-      project_id: project.id,
-      source_video_id: video.id,
-      type: "download_video",
+    return reply.code(videoError.code === "23505" ? 409 : 400).send({
+      error:
+        videoError.code === "23505"
+          ? "This video is already registered in this workspace"
+          : "Could not register source video",
     });
+  }
+  const { error: jobError } = await admin.from("processing_jobs").insert({
+    tenant_id: tenantId,
+    project_id: project.id,
+    source_video_id: video.id,
+    type: "download_video",
+  });
   if (jobError) {
     await admin.from("projects").delete().eq("id", project.id);
     return reply.code(503).send({ error: "Could not enqueue processing job" });
@@ -691,20 +684,16 @@ app.post("/v1/projects/:projectId/assets", async (request, reply) => {
     await admin.storage.from("clipcon-media").remove([storagePath]);
     return reply.code(503).send({ error: "Could not register media asset" });
   }
-  const { error: jobError } = await admin
-    .from("processing_jobs")
-    .insert({
-      tenant_id: project.tenant_id,
-      project_id: projectId,
-      type: "process_asset",
-      artifacts: { assetId },
-    });
+  const { error: jobError } = await admin.from("processing_jobs").insert({
+    tenant_id: project.tenant_id,
+    project_id: projectId,
+    type: "process_asset",
+    artifacts: { assetId },
+  });
   if (jobError)
-    return reply
-      .code(503)
-      .send({
-        error: "Media was stored but could not be queued for processing",
-      });
+    return reply.code(503).send({
+      error: "Media was stored but could not be queued for processing",
+    });
   return reply.code(201).send({ asset });
 });
 
@@ -782,20 +771,16 @@ app.post(
         .code(503)
         .send({ error: "Could not register imported media" });
     }
-    const { error: jobError } = await admin
-      .from("processing_jobs")
-      .insert({
-        tenant_id: project.tenant_id,
-        project_id: projectId,
-        type: "process_asset",
-        artifacts: { assetId },
-      });
+    const { error: jobError } = await admin.from("processing_jobs").insert({
+      tenant_id: project.tenant_id,
+      project_id: projectId,
+      type: "process_asset",
+      artifacts: { assetId },
+    });
     if (jobError)
-      return reply
-        .code(503)
-        .send({
-          error: "Media was stored but could not be queued for processing",
-        });
+      return reply.code(503).send({
+        error: "Media was stored but could not be queued for processing",
+      });
     return reply.code(201).send({ asset });
   },
 );
@@ -948,14 +933,12 @@ app.post("/v1/projects/:projectId/exports", async (request, reply) => {
     .select("id, status, created_at")
     .single();
   if (error) return reply.code(503).send({ error: "Could not create export" });
-  const { error: queueError } = await admin
-    .from("processing_jobs")
-    .insert({
-      tenant_id: project.tenant_id,
-      project_id: projectId,
-      type: "export_sequence",
-      artifacts: { exportId: exportJob.id },
-    });
+  const { error: queueError } = await admin.from("processing_jobs").insert({
+    tenant_id: project.tenant_id,
+    project_id: projectId,
+    type: "export_sequence",
+    artifacts: { exportId: exportJob.id },
+  });
   if (queueError)
     return reply.code(503).send({ error: "Could not queue export" });
   return reply.code(202).send({ export: exportJob });
@@ -1013,14 +996,12 @@ app.post("/v1/projects/:projectId/ai-edit", async (request, reply) => {
     .single();
   if (error)
     return reply.code(503).send({ error: "Could not create AI edit run" });
-  const { error: queueError } = await admin
-    .from("processing_jobs")
-    .insert({
-      tenant_id: project.tenant_id,
-      project_id: projectId,
-      type: "ai_edit",
-      artifacts: { runId: run.id, assetId: asset.id, sequenceId: sequence.id },
-    });
+  const { error: queueError } = await admin.from("processing_jobs").insert({
+    tenant_id: project.tenant_id,
+    project_id: projectId,
+    type: "ai_edit",
+    artifacts: { runId: run.id, assetId: asset.id, sequenceId: sequence.id },
+  });
   if (queueError)
     return reply.code(503).send({ error: "Could not queue AI edit" });
   return reply.code(202).send({ run });
@@ -1075,11 +1056,9 @@ app.post("/v1/projects/:projectId/clip-studio", async (request, reply) => {
     asset.status !== "ready" ||
     asset.kind !== "video"
   )
-    return reply
-      .code(400)
-      .send({
-        error: "A ready video asset and project workspace are required",
-      });
+    return reply.code(400).send({
+      error: "A ready video asset and project workspace are required",
+    });
   const settings = {
     duration_preset: body.duration_preset ?? "45-90",
     format: body.format ?? "full_screen",
@@ -1100,14 +1079,12 @@ app.post("/v1/projects/:projectId/clip-studio", async (request, reply) => {
     .single();
   if (error || !run)
     return reply.code(503).send({ error: "Could not create Clip Studio run" });
-  const { error: queueError } = await admin
-    .from("processing_jobs")
-    .insert({
-      tenant_id: project.tenant_id,
-      project_id: projectId,
-      type: "clip_studio",
-      artifacts: { runId: run.id, assetId: asset.id },
-    });
+  const { error: queueError } = await admin.from("processing_jobs").insert({
+    tenant_id: project.tenant_id,
+    project_id: projectId,
+    type: "clip_studio",
+    artifacts: { runId: run.id, assetId: asset.id },
+  });
   if (queueError)
     return reply.code(503).send({ error: "Could not queue Clip Studio run" });
   return reply.code(202).send({ run });
@@ -1618,29 +1595,27 @@ app.get("/v1/integrations/google/callback", async (request, reply) => {
   const account = tokens.access_token
     ? await fetchAccountLabel(state.provider, tokens.access_token)
     : { email: null, label: null, type: null };
-  const { error } = await admin
-    .from("integrations")
-    .upsert(
-      {
-        tenant_id: state.tenantId,
-        provider: state.provider,
-        scopes: getProviderScopes(state.provider),
-        account_email: account.email,
-        encrypted_access_token: tokens.access_token
-          ? encryptToken(tokens.access_token)
-          : null,
-        encrypted_refresh_token: tokens.refresh_token
-          ? encryptToken(tokens.refresh_token)
-          : null,
-        token_expires_at: tokens.expiry_date
-          ? new Date(tokens.expiry_date).toISOString()
-          : null,
-        connected_at: new Date().toISOString(),
-        last_error: null,
-        metadata: { accountLabel: account.label, accountType: account.type },
-      },
-      { onConflict: "tenant_id,provider" },
-    );
+  const { error } = await admin.from("integrations").upsert(
+    {
+      tenant_id: state.tenantId,
+      provider: state.provider,
+      scopes: getProviderScopes(state.provider),
+      account_email: account.email,
+      encrypted_access_token: tokens.access_token
+        ? encryptToken(tokens.access_token)
+        : null,
+      encrypted_refresh_token: tokens.refresh_token
+        ? encryptToken(tokens.refresh_token)
+        : null,
+      token_expires_at: tokens.expiry_date
+        ? new Date(tokens.expiry_date).toISOString()
+        : null,
+      connected_at: new Date().toISOString(),
+      last_error: null,
+      metadata: { accountLabel: account.label, accountType: account.type },
+    },
+    { onConflict: "tenant_id,provider" },
+  );
   if (error)
     return reply.redirect(
       `${config.WEB_ORIGIN}/?google=savefailed&provider=${state.provider}`,
