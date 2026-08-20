@@ -112,12 +112,17 @@ export async function extractAudio(videoPath: string, workDir: string): Promise<
   return out;
 }
 
-export async function renderClip(videoPath: string, startSec: number, endSec: number, outPath: string, vertical = true): Promise<string> {
+export async function renderClip(videoPath: string, startSec: number, endSec: number, outPath: string, vertical = true, overlay?: { text: string; color?: string; fontSize?: number }): Promise<string> {
   const duration = Math.max(1, Math.round(endSec - startSec));
   const filter = vertical
     ? 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-1080)/2:(ih-1920)/2'
     : 'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080:(iw-1920)/2:(ih-1080)/2';
-  await execFileAsync('ffmpeg', ['-y', '-ss', String(startSec), '-i', videoPath, '-t', String(duration), '-vf', filter + ',fps=30', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outPath], { timeout: 5 * 60_000 });
+  const filters = [filter, 'fps=30'];
+  if (overlay?.text?.trim()) {
+    const text = overlay.text.replace(/[\\':,]/g, match => `\\${match}`).replace(/\n/g, ' ');
+    filters.push(`drawtext=fontfile=/usr/share/fonts/dejavu/DejaVuSans.ttf:text='${text}':fontcolor=${overlay.color ?? 'white'}:fontsize=${overlay.fontSize ?? 48}:x=(w-text_w)/2:y=100:box=1:boxcolor=black@0.55`);
+  }
+  await execFileAsync('ffmpeg', ['-y', '-ss', String(startSec), '-i', videoPath, '-t', String(duration), '-vf', filters.join(','), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outPath], { timeout: 5 * 60_000 });
   return outPath;
 }
 

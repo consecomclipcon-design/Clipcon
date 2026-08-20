@@ -271,6 +271,10 @@ export async function handleAnalyzePerformance(supabase: SupabaseClient, job: Jo
     ? await supabase.from('learning_patterns').update(values).eq('id', existing.id)
     : await supabase.from('learning_patterns').insert(values);
   if (result.error) throw new Error('Could not save learning baseline: ' + result.error.message);
+  const { data: project } = job.project_id ? await supabase.from('projects').select('workspace_id').eq('id', job.project_id).maybeSingle() : { data: null };
+  if (project?.workspace_id) {
+    await supabase.from('learning_profiles').upsert({ tenant_id: job.tenant_id, workspace_id: project.workspace_id, profile: { averageViews, averageScore, bestPractices: ['Retenção e payoff devem ser medidos antes de ampliar o formato.'] }, sample_size: sampleSize, confidence, updated_at: new Date().toISOString() }, { onConflict: 'workspace_id' });
+  }
 }
 
 export async function handleProcessAsset(supabase: SupabaseClient, job: Job) {
@@ -340,7 +344,7 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
   const runId = job.artifacts.runId as string;
   const assetId = job.artifacts.assetId as string;
   if (!runId || !assetId) throw new Error('clip_studio job is missing run or asset');
-  const { data: run } = await supabase.from('clip_studio_runs').select('id, tenant_id, workspace_id, project_id, asset_id, settings, created_by').eq('id', runId).single();
+    const { data: run } = await supabase.from('clip_studio_runs').select('id, tenant_id, workspace_id, project_id, asset_id, settings, created_by').eq('id', runId).single();
   const { data: asset } = await supabase.from('media_assets').select('storage_path, status, kind').eq('id', assetId).single();
   if (!run || !asset || asset.status !== 'ready' || asset.kind !== 'video') throw new Error('Clip Studio input asset is unavailable');
   await supabase.from('clip_studio_runs').update({ status: 'processing', error_message: null }).eq('id', runId);
@@ -372,18 +376,20 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
     const { data: savedCandidates, error: candidateError } = await supabase.from('clip_candidates').insert(candidateRows).select('id');
     if (candidateError || !savedCandidates) throw new Error('Could not save Clip Studio candidates');
     const clips: string[] = [];
+    const { data: brandKit } = await supabase.from('brand_kits').select('id, config').eq('workspace_id', run.workspace_id).maybeSingle();
+    const brandConfig = (brandKit?.config ?? {}) as { primaryColor?: string; accentColor?: string; headline?: { color?: string; fontSize?: number } };
     for (let index = 0; index < selected.length; index++) {
       const candidate = selected[index];
       const candidateRow = savedCandidates[index];
       const renderedPath = join(workDir, `clip-${index}.mp4`);
-      await renderClip(sourcePath, candidate.start, candidate.end, renderedPath, true);
+      await renderClip(sourcePath, candidate.start, candidate.end, renderedPath, true, { text: candidate.headlineOptions?.[0] ?? candidate.title ?? '', color: brandConfig.headline?.color ?? brandConfig.accentColor ?? 'white', fontSize: brandConfig.headline?.fontSize ?? 48 });
       const buffer = await readFileBuffer(renderedPath);
       const outputPath = `${run.tenant_id}/${run.project_id}/clip-studio/${run.id}/${candidateRow.id}.mp4`;
       const uploaded = await supabase.storage.from('clipcon-media').upload(outputPath, buffer, { contentType: 'video/mp4', upsert: true });
       if (uploaded.error) throw new Error('Could not store Clip Studio output');
       const { data: outputAsset, error: outputError } = await supabase.from('media_assets').insert({ tenant_id: run.tenant_id, project_id: run.project_id, name: `${candidate.title ?? 'clip'}-${index + 1}.mp4`, kind: 'video', mime_type: 'video/mp4', storage_path: outputPath, size_bytes: buffer.length, duration_seconds: Math.round((candidate.end - candidate.start) * 1000) / 1000, width: 1080, height: 1920, status: 'ready', metadata: { source_asset_id: assetId, clip_studio_run_id: run.id }, created_by: run.created_by }).select('id').single();
       if (outputError || !outputAsset) throw new Error('Could not register Clip Studio output');
-      const { data: clip, error: clipError } = await supabase.from('clips').insert({ tenant_id: run.tenant_id, workspace_id: run.workspace_id, project_id: run.project_id, candidate_id: candidateRow.id, output_asset_id: outputAsset.id, title: candidate.title ?? `Clip ${index + 1}`, headline: candidate.headlineOptions?.[0] ?? candidate.title ?? null, description: candidate.reason ?? '', status: 'ready', format: (run.settings as { format?: string }).format ?? 'full_screen', duration_seconds: Math.round((candidate.end - candidate.start) * 1000) / 1000 }).select('id').single();
+      const { data: clip, error: clipError } = await supabase.from('clips').insert({ tenant_id: run.tenant_id, workspace_id: run.workspace_id, brand_kit_id: brandKit?.id ?? null, project_id: run.project_id, candidate_id: candidateRow.id, output_asset_id: outputAsset.id, title: candidate.title ?? `Clip ${index + 1}`, headline: candidate.headlineOptions?.[0] ?? candidate.title ?? null, description: candidate.reason ?? '', status: 'ready', format: (run.settings as { format?: string }).format ?? 'full_screen', duration_seconds: Math.round((candidate.end - candidate.start) * 1000) / 1000 }).select('id').single();
       if (clipError || !clip) throw new Error('Could not register Clip Studio clip');
       clips.push(clip.id);
     }
