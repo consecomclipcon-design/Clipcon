@@ -11,6 +11,7 @@ import {
   renderClip,
   renderSequence,
   readFileBuffer,
+  detectSmartCrop,
   type SequenceOverlay,
 } from "./media.js";
 import { transcribeAudio, analyzeTranscript } from "./groq.js";
@@ -1337,6 +1338,18 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
       const candidate = selected[index];
       const candidateRow = savedCandidates[index];
       const renderedPath = join(workDir, `clip-${index}.mp4`);
+      const smartCrop = await detectSmartCrop(
+        sourcePath,
+        candidate.start,
+        candidate.end - candidate.start,
+      );
+      await supabase
+        .from("clip_candidates")
+        .update({
+          smart_crop: smartCrop,
+          feature_snapshot: { smart_crop: smartCrop },
+        })
+        .eq("id", candidateRow.id);
       await renderClip(
         sourcePath,
         candidate.start,
@@ -1353,6 +1366,7 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
             (run.settings as { secondary_ratio?: number }).secondary_ratio ??
               0.5,
           ),
+          smartCrop,
         },
       );
       const buffer = await readFileBuffer(renderedPath);
@@ -1376,7 +1390,11 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
           width: 1080,
           height: 1920,
           status: "ready",
-          metadata: { source_asset_id: assetId, clip_studio_run_id: run.id },
+          metadata: {
+            source_asset_id: assetId,
+            clip_studio_run_id: run.id,
+            smart_crop: smartCrop,
+          },
           created_by: run.created_by,
         })
         .select("id")

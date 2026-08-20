@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, writeFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { config } from "./config.js";
 
 const execFileAsync = promisify(execFile);
@@ -280,6 +280,53 @@ export async function extractAudio(
   return out;
 }
 
+export type SmartCropKeyframe = {
+  time: number;
+  center: number;
+  target: string;
+};
+export type SmartCropResult = {
+  width: number;
+  height: number;
+  tracked: boolean;
+  keyframes: SmartCropKeyframe[];
+};
+
+export async function detectSmartCrop(
+  videoPath: string,
+  startSeconds: number,
+  durationSeconds: number,
+): Promise<SmartCropResult> {
+  const script = resolve(
+    new URL("../scripts/smartcrop.py", import.meta.url).pathname,
+  );
+  const { stdout } = await execFileAsync(
+    "python3",
+    [script, videoPath, String(startSeconds), String(durationSeconds)],
+    { timeout: 3 * 60_000, maxBuffer: 2 * 1024 * 1024 },
+  );
+  return JSON.parse(stdout) as SmartCropResult;
+}
+
+function smartCropExpression(result: SmartCropResult, cropWidth: number) {
+  const maxX = Math.max(0, result.width - cropWidth);
+  const points = result.keyframes.map((frame) => ({
+    time: frame.time,
+    x: Math.round(
+      Math.min(maxX, Math.max(0, frame.center * result.width - cropWidth / 2)),
+    ),
+  }));
+  if (points.length === 1) return String(points[0].x);
+  let expression = String(points[points.length - 1].x);
+  for (let index = points.length - 2; index >= 0; index--) {
+    const current = points[index];
+    const next = points[index + 1];
+    const span = Math.max(0.001, next.time - current.time);
+    expression = `if(lt(t\\,${next.time})\\,${current.x}+(${next.x}-${current.x})*(t-${current.time})/${span}\\,${expression})`;
+  }
+  return expression;
+}
+
 export async function renderClip(
   videoPath: string,
   startSec: number,
@@ -292,6 +339,7 @@ export async function renderClip(
     fontSize?: number;
     secondaryPath?: string;
     secondaryRatio?: number;
+    smartCrop?: SmartCropResult;
   },
 ): Promise<string> {
   const duration = Math.max(1, Math.round(endSec - startSec));
@@ -342,9 +390,20 @@ export async function renderClip(
     );
     return outPath;
   }
-  const filter = vertical
+  let filter = vertical
     ? "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-1080)/2:(ih-1920)/2"
     : "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080:(iw-1920)/2:(ih-1080)/2";
+  if (
+    vertical &&
+    overlay?.smartCrop?.tracked &&
+    overlay.smartCrop.width > overlay.smartCrop.height
+  ) {
+    const cropWidth = Math.max(
+      1,
+      Math.round((overlay.smartCrop.height * 9) / 16),
+    );
+    filter = `crop=${cropWidth}:${overlay.smartCrop.height}:${smartCropExpression(overlay.smartCrop, cropWidth)}:0,scale=1080:1920`;
+  }
   const filters = [filter, "fps=30"];
   if (overlay?.text?.trim()) {
     const text = overlay.text
