@@ -1180,7 +1180,7 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
     .single();
   const { data: asset } = await supabase
     .from("media_assets")
-    .select("storage_path, status, kind")
+    .select("storage_path, status, kind, duration_seconds")
     .eq("id", assetId)
     .single();
   if (!run || !asset || asset.status !== "ready" || asset.kind !== "video")
@@ -1298,6 +1298,33 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
       selected.push(candidate);
       if (selected.length >= 5) break;
     }
+    if (
+      !selected.length &&
+      Number.isFinite(asset?.duration_seconds) &&
+      (asset.duration_seconds ?? 0) >= 45
+    ) {
+      const total = asset.duration_seconds as number;
+      const span = Math.min(60, Math.max(45, total / 3));
+      const count = Math.min(5, Math.max(1, Math.floor(total / span)));
+      for (let index = 0; index < count; index++) {
+        const start = Math.max(
+          0,
+          Math.min(
+            total - span,
+            (index * (total - span)) / Math.max(1, count - 1),
+          ),
+        );
+        selected.push({
+          start: +start.toFixed(3),
+          end: +(start + span).toFixed(3),
+          title: `Clip ${index + 1}`,
+          headlineOptions: [`Clip ${index + 1}`],
+          reason: "Fallback segment because AI found no candidates",
+          category: "fallback",
+          score: 50,
+        });
+      }
+    }
     if (!selected.length)
       throw new Error(
         "Clip Studio found no independent moments with a valid payoff",
@@ -1308,7 +1335,10 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
       source_video_id: null,
       start_seconds: Number(candidate.start),
       end_seconds: Number(candidate.end),
-      score: Math.min(100, Math.max(0, Math.round(Number(candidate.score) || 50))),
+      score: Math.min(
+        100,
+        Math.max(0, Math.round(Number(candidate.score) || 50)),
+      ),
       title: candidate.title ?? "Clip",
       headline_options: candidate.headlineOptions ?? [],
       reason: candidate.reason ?? null,
