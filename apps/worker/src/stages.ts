@@ -8,7 +8,7 @@ import { downloadVideo, extractAudio, inspectMedia, renderClip, renderSequence, 
 import { transcribeAudio, analyzeTranscript } from './groq.js';
 import { fetchYoutubeVideoMetrics, uploadFileToDrive, uploadVideoToYouTube } from './google.js';
 import { calculatePerformanceScore } from './performance.js';
-import { resolveAiCredential, recordAiUsage } from './ai-orchestrator.js';
+import { resolveAiCredential, recordAiUsage, withAiFailover } from './ai-orchestrator.js';
 
 export type Job = {
   id: string;
@@ -59,11 +59,7 @@ export async function handleTranscribe(supabase: SupabaseClient, job: Job) {
   const { data: video, error } = await supabase.from('source_videos').select('id, audio_path').eq('id', job.source_video_id).single();
   if (error || !video?.audio_path) throw new Error('No audio available; re-run extraction stage');
   await setProgress(supabase, job, 30);
-  const credential = await resolveAiCredential(supabase, job.tenant_id, job.project_id, 'TRANSCRIPTION');
-  const startedAt = Date.now();
-  let result;
-  try { result = await transcribeAudio(video.audio_path, { key: credential.secret, model: credential.model }); await recordAiUsage(supabase, credential, job.tenant_id, job.project_id, 'transcription', 'success', Date.now() - startedAt); }
-  catch (error) { await recordAiUsage(supabase, credential, job.tenant_id, job.project_id, 'transcription', 'error', Date.now() - startedAt, error instanceof Error ? error.name : 'AI_ERROR'); throw error; }
+  const result = await withAiFailover(supabase, job.tenant_id, job.project_id, 'TRANSCRIPTION', 'transcription', credential => transcribeAudio(video.audio_path!, { key: credential.secret, model: credential.model }));
   const { data: tr, error: trErr } = await supabase.from('transcriptions').upsert({ tenant_id: job.tenant_id, source_video_id: video.id, language: 'pt-BR', model: config.GROQ_TRANSCRIPTION_MODEL ?? 'groq', status: 'completed' }, { onConflict: 'source_video_id' }).select('id').single();
   if (trErr) throw new Error('Could not save transcription: ' + trErr.message);
   const segRows = result.segments.filter(s => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start).map((s, i) => ({ tenant_id: job.tenant_id, transcription_id: tr.id, segment_index: i, start_seconds: s.start, end_seconds: s.end, text_content: s.text }));
@@ -83,11 +79,7 @@ export async function handleAnalyze(supabase: SupabaseClient, job: Job) {
   if (!segments?.length) throw new Error('Transcription has no segments');
   const transcriptText = segments.map(s => `[${s.start_seconds}-${s.end_seconds}] ${s.text_content}`).join('\n');
   await setProgress(supabase, job, 55);
-  const credential = await resolveAiCredential(supabase, job.tenant_id, job.project_id, 'TEXT_GENERATION');
-  const startedAt = Date.now();
-  let candidates;
-  try { candidates = await analyzeTranscript(transcriptText, { key: credential.secret, model: credential.model }); await recordAiUsage(supabase, credential, job.tenant_id, job.project_id, 'clip_analysis', 'success', Date.now() - startedAt); }
-  catch (error) { await recordAiUsage(supabase, credential, job.tenant_id, job.project_id, 'clip_analysis', 'error', Date.now() - startedAt, error instanceof Error ? error.name : 'AI_ERROR'); throw error; }
+  const candidates = await withAiFailover(supabase, job.tenant_id, job.project_id, 'TEXT_GENERATION', 'clip_analysis', credential => analyzeTranscript(transcriptText, { key: credential.secret, model: credential.model }));
   const rows = candidates.filter(c => Number.isFinite(c.start) && Number.isFinite(c.end)).map(c => {
     const start = Math.max(0, c.start);
     const end = Math.min(c.end, start + 120);

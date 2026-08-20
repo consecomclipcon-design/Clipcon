@@ -1,19 +1,61 @@
-import { StrictMode, useEffect, useState, type FormEvent } from 'react';
-import { createRoot } from 'react-dom/client';
-import type { Session } from '@supabase/supabase-js';
-import { createSupabaseClient } from './lib/supabase';
-import { loadPublicConfig } from './config';
-import { EditorWorkspace } from './EditorWorkspace';
-import './styles.css';
+import { StrictMode, useEffect, useState, type FormEvent } from "react";
+import { createRoot } from "react-dom/client";
+import type { Session } from "@supabase/supabase-js";
+import { createSupabaseClient } from "./lib/supabase";
+import { loadPublicConfig } from "./config";
+import { EditorWorkspace } from "./EditorWorkspace";
+import { AiProvidersView } from "./AiProvidersView";
+import "./styles.css";
 
 type Tenant = { id: string; name: string; slug: string; status: string };
-type Project = { id: string; name: string; description?: string | null; strategy?: string; status: string; created_at: string };
-type IntegrationStatus = { configured: boolean; connected: boolean; accountEmail: string | null; accountLabel: string | null; lastError: string | null };
-type Clip = { id: string; project_id: string; title: string; status: string; duration_seconds?: number | null; candidate?: { start_seconds: number; end_seconds: number; score: number; hook?: string; reason?: string; category?: string }; performance?: { views: number; likes: number; comments: number; subscribers_gained?: number; average_percentage_viewed?: number; performance_score?: number } | null; publication?: { youtube_video_id?: string; youtube_url?: string; status: string } | null };
-type View = 'home' | 'clips' | 'performance' | 'editor' | 'settings' | 'ai-providers';
+type Project = {
+  id: string;
+  name: string;
+  description?: string | null;
+  strategy?: string;
+  status: string;
+  created_at: string;
+};
+type IntegrationStatus = {
+  configured: boolean;
+  connected: boolean;
+  accountEmail: string | null;
+  accountLabel: string | null;
+  lastError: string | null;
+};
+type Clip = {
+  id: string;
+  project_id: string;
+  title: string;
+  status: string;
+  duration_seconds?: number | null;
+  candidate?: {
+    start_seconds: number;
+    end_seconds: number;
+    score: number;
+    hook?: string;
+    reason?: string;
+    category?: string;
+  };
+  performance?: {
+    views: number;
+    likes: number;
+    comments: number;
+    subscribers_gained?: number;
+    average_percentage_viewed?: number;
+    performance_score?: number;
+  } | null;
+  publication?: {
+    youtube_video_id?: string;
+    youtube_url?: string;
+    status: string;
+  } | null;
+};
+type View =
+  "home" | "clips" | "performance" | "editor" | "settings" | "ai-providers";
 
 let supabase: ReturnType<typeof createSupabaseClient> = null;
-let apiUrl = '';
+let apiUrl = "";
 
 function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -22,48 +64,1114 @@ function App() {
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [clips, setClips] = useState<Clip[]>([]);
-  const [view, setView] = useState<View>('home');
+  const [view, setView] = useState<View>("home");
   const [selectedClip, setSelectedClip] = useState<Clip | null>(null);
-  const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [newPassword, setNewPassword] = useState('');
-  const [workspaceName, setWorkspaceName] = useState(''); const [workspaceSlug, setWorkspaceSlug] = useState(''); const [projectName, setProjectName] = useState(''); const [sourceUrl, setSourceUrl] = useState(''); const [strategy, setStrategy] = useState('viral');
-  const [mustChangePassword, setMustChangePassword] = useState(false); const [showProjectForm, setShowProjectForm] = useState(false); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
-  const [googleStatus, setGoogleStatus] = useState<{ drive: IntegrationStatus; youtube: IntegrationStatus } | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [workspaceSlug, setWorkspaceSlug] = useState("");
+  const [projectName, setProjectName] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [strategy, setStrategy] = useState("viral");
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [showProjectForm, setShowProjectForm] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [googleStatus, setGoogleStatus] = useState<{
+    drive: IntegrationStatus;
+    youtube: IntegrationStatus;
+  } | null>(null);
 
-  useEffect(() => { if (!supabase) { setAuthLoading(false); return; } let active = true; supabase.auth.getSession().then(({ data }) => { if (active) { setSession(data.session); setAuthLoading(false); } }); const { data } = supabase.auth.onAuthStateChange((_event, next) => active && setSession(next)); return () => { active = false; data.subscription.unsubscribe(); }; }, []);
-  useEffect(() => { const client = supabase; if (!client || !session) return; setProfileLoading(true); let active = true; (async () => { const profile = await client.from('profiles').select('must_change_password').eq('id', session.user.id).single(); if (active) setMustChangePassword(Boolean(profile.data?.must_change_password)); const response = await fetch(`${apiUrl}/v1/me`, { headers: { Authorization: `Bearer ${session.access_token}` } }); if (response.status === 401) return client.auth.signOut(); const data = await response.json(); if (active) setTenant(data.memberships?.[0]?.tenants ?? null); })().catch(() => {}).finally(() => active && setProfileLoading(false)); return () => { active = false; }; }, [session]);
-  useEffect(() => { if (!supabase || !tenant) return; loadProjects(); loadIntegrations(); loadClips(); const channel = supabase.channel(`tenant:${tenant.id}:jobs`).on('postgres_changes', { event: '*', schema: 'public', table: 'processing_jobs', filter: `tenant_id=eq.${tenant.id}` }, () => { loadProjects(); loadClips(); }).subscribe(); return () => { supabase?.removeChannel(channel); }; }, [tenant]);
+  useEffect(() => {
+    if (!supabase) {
+      setAuthLoading(false);
+      return;
+    }
+    let active = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (active) {
+        setSession(data.session);
+        setAuthLoading(false);
+      }
+    });
+    const { data } = supabase.auth.onAuthStateChange(
+      (_event, next) => active && setSession(next),
+    );
+    return () => {
+      active = false;
+      data.subscription.unsubscribe();
+    };
+  }, []);
+  useEffect(() => {
+    const client = supabase;
+    if (!client || !session) return;
+    setProfileLoading(true);
+    let active = true;
+    (async () => {
+      const profile = await client
+        .from("profiles")
+        .select("must_change_password")
+        .eq("id", session.user.id)
+        .single();
+      if (active)
+        setMustChangePassword(Boolean(profile.data?.must_change_password));
+      const response = await fetch(`${apiUrl}/v1/me`, {
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (response.status === 401) return client.auth.signOut();
+      const data = await response.json();
+      if (active) setTenant(data.memberships?.[0]?.tenants ?? null);
+    })()
+      .catch(() => {})
+      .finally(() => active && setProfileLoading(false));
+    return () => {
+      active = false;
+    };
+  }, [session]);
+  useEffect(() => {
+    if (!supabase || !tenant) return;
+    loadProjects();
+    loadIntegrations();
+    loadClips();
+    const channel = supabase
+      .channel(`tenant:${tenant.id}:jobs`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "processing_jobs",
+          filter: `tenant_id=eq.${tenant.id}`,
+        },
+        () => {
+          loadProjects();
+          loadClips();
+        },
+      )
+      .subscribe();
+    return () => {
+      supabase?.removeChannel(channel);
+    };
+  }, [tenant]);
 
-  async function authFetch(path: string, init: RequestInit = {}) { return fetch(`${apiUrl}${path}`, { ...init, headers: { Authorization: `Bearer ${session!.access_token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) } }); }
-  async function loadProjects() { if (!tenant) return; const { data } = await supabase!.from('projects').select('id, name, description, strategy, status, created_at').eq('tenant_id', tenant.id).order('created_at', { ascending: false }); setProjects(data ?? []); }
-  async function loadClips() { if (!tenant || !session) return; const response = await authFetch(`/v1/clips?tenant_id=${tenant.id}`); if (response.ok) setClips((await response.json()).clips ?? []); }
-  async function loadIntegrations() { if (!tenant || !session) return; const response = await authFetch(`/v1/integrations/google/status?tenant_id=${tenant.id}`); if (response.ok) setGoogleStatus(await response.json()); }
-  async function signIn(event: FormEvent) { event.preventDefault(); setError(''); if (!supabase) return setError('Supabase ainda não foi configurado.'); const result = await supabase.auth.signInWithPassword({ email, password }); if (result.error) setError('E-mail ou senha inválidos.'); }
-  async function changePassword(event: FormEvent) { event.preventDefault(); setError(''); const result = await supabase!.auth.updateUser({ password: newPassword }); if (result.error) return setError('Use uma senha forte com pelo menos 12 caracteres.'); const profile = await supabase!.from('profiles').update({ must_change_password: false }).eq('id', session!.user.id); if (profile.error) return setError('Senha alterada, mas o perfil não foi atualizado.'); setMustChangePassword(false); }
-  async function createWorkspace(event: FormEvent) { event.preventDefault(); setBusy(true); const response = await authFetch('/v1/tenants', { method: 'POST', body: JSON.stringify({ name: workspaceName, slug: workspaceSlug }) }); const data = await response.json(); setBusy(false); if (!response.ok) return setError(data.error ?? 'Não foi possível criar o workspace.'); setTenant(data.tenant); }
-  async function createProject(event: FormEvent) { event.preventDefault(); setBusy(true); setError(''); const response = await authFetch('/v1/projects', { method: 'POST', body: JSON.stringify({ tenant_id: tenant!.id, name: projectName, strategy, source_url: sourceUrl }) }); const data = await response.json(); setBusy(false); if (!response.ok) return setError(data.error ?? 'Não foi possível criar o projeto.'); setProjects(current => [data.project, ...current]); setProjectName(''); setSourceUrl(''); setStrategy('viral'); setShowProjectForm(false); setView('clips'); }
-  async function connectIntegration(provider: 'drive' | 'youtube') { const response = await authFetch(`/v1/integrations/google/start?tenant_id=${tenant!.id}&provider=${provider}`); const data = await response.json(); if (!response.ok) return setError(data.error ?? 'Não foi possível iniciar a conexão.'); window.location.href = data.url; }
-  async function disconnectIntegration(provider: 'drive' | 'youtube') { await authFetch(`/v1/integrations/google/disconnect?tenant_id=${tenant!.id}&provider=${provider}`, { method: 'DELETE' }); loadIntegrations(); }
-  async function signOut() { await supabase?.auth.signOut(); }
+  async function authFetch(path: string, init: RequestInit = {}) {
+    return fetch(`${apiUrl}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${session!.access_token}`,
+        "Content-Type": "application/json",
+        ...(init.headers ?? {}),
+      },
+    });
+  }
+  async function loadProjects() {
+    if (!tenant) return;
+    const { data } = await supabase!
+      .from("projects")
+      .select("id, name, description, strategy, status, created_at")
+      .eq("tenant_id", tenant.id)
+      .order("created_at", { ascending: false });
+    setProjects(data ?? []);
+  }
+  async function loadClips() {
+    if (!tenant || !session) return;
+    const response = await authFetch(`/v1/clips?tenant_id=${tenant.id}`);
+    if (response.ok) setClips((await response.json()).clips ?? []);
+  }
+  async function loadIntegrations() {
+    if (!tenant || !session) return;
+    const response = await authFetch(
+      `/v1/integrations/google/status?tenant_id=${tenant.id}`,
+    );
+    if (response.ok) setGoogleStatus(await response.json());
+  }
+  async function signIn(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    if (!supabase) return setError("Supabase ainda não foi configurado.");
+    const result = await supabase.auth.signInWithPassword({ email, password });
+    if (result.error) setError("E-mail ou senha inválidos.");
+  }
+  async function changePassword(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    const result = await supabase!.auth.updateUser({ password: newPassword });
+    if (result.error)
+      return setError("Use uma senha forte com pelo menos 12 caracteres.");
+    const profile = await supabase!
+      .from("profiles")
+      .update({ must_change_password: false })
+      .eq("id", session!.user.id);
+    if (profile.error)
+      return setError("Senha alterada, mas o perfil não foi atualizado.");
+    setMustChangePassword(false);
+  }
+  async function createWorkspace(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    const response = await authFetch("/v1/tenants", {
+      method: "POST",
+      body: JSON.stringify({ name: workspaceName, slug: workspaceSlug }),
+    });
+    const data = await response.json();
+    setBusy(false);
+    if (!response.ok)
+      return setError(data.error ?? "Não foi possível criar o workspace.");
+    setTenant(data.tenant);
+  }
+  async function createProject(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const response = await authFetch("/v1/projects", {
+      method: "POST",
+      body: JSON.stringify({
+        tenant_id: tenant!.id,
+        name: projectName,
+        strategy,
+        source_url: sourceUrl,
+      }),
+    });
+    const data = await response.json();
+    setBusy(false);
+    if (!response.ok)
+      return setError(data.error ?? "Não foi possível criar o projeto.");
+    setProjects((current) => [data.project, ...current]);
+    setProjectName("");
+    setSourceUrl("");
+    setStrategy("viral");
+    setShowProjectForm(false);
+    setView("clips");
+  }
+  async function connectIntegration(provider: "drive" | "youtube") {
+    const response = await authFetch(
+      `/v1/integrations/google/start?tenant_id=${tenant!.id}&provider=${provider}`,
+    );
+    const data = await response.json();
+    if (!response.ok)
+      return setError(data.error ?? "Não foi possível iniciar a conexão.");
+    window.location.href = data.url;
+  }
+  async function disconnectIntegration(provider: "drive" | "youtube") {
+    await authFetch(
+      `/v1/integrations/google/disconnect?tenant_id=${tenant!.id}&provider=${provider}`,
+      { method: "DELETE" },
+    );
+    loadIntegrations();
+  }
+  async function signOut() {
+    await supabase?.auth.signOut();
+  }
 
   if (authLoading || profileLoading) return <LoadingScreen />;
-  if (!session) return <main className="auth"><section className="hero"><span className="eyebrow">CLIPCON / CONTENT INTELLIGENCE</span><h1>Do episódio longo ao próximo momento que importa.</h1><p>Produza, publique e aprenda com cada Short em um workspace feito para criadores.</p></section><form className="card login" onSubmit={signIn}><div><span className="eyebrow">WORKSPACE ACCESS</span><h2>Entrar no ClipCon</h2><p className="muted">Acesse seu workspace com segurança.</p></div><label>E-mail<input type="email" required value={email} onChange={event => setEmail(event.target.value)} /></label><label>Senha<input type="password" required value={password} onChange={event => setPassword(event.target.value)} /></label>{error && <div className="error">{error}</div>}<button type="submit">Entrar no workspace <span>↗</span></button></form></main>;
-  if (mustChangePassword) return <main className="auth"><form className="card login" onSubmit={changePassword}><span className="eyebrow">SECURITY CHECK</span><h2>Atualize sua senha</h2><p className="muted">Por segurança, altere a senha inicial antes de continuar.</p><label>Nova senha<input type="password" minLength={12} required value={newPassword} onChange={event => setNewPassword(event.target.value)} /></label>{error && <div className="error">{error}</div>}<button type="submit">Salvar nova senha <span>↗</span></button></form></main>;
-  if (!tenant) return <main className="auth"><form className="card login" onSubmit={createWorkspace}><span className="eyebrow">FIRST WORKSPACE</span><h2>Crie seu workspace</h2><p className="muted">Um workspace mantém seus projetos e arquivos isolados.</p><label>Nome<input required value={workspaceName} onChange={event => setWorkspaceName(event.target.value)} placeholder="Minha produtora" /></label><label>Slug<input required value={workspaceSlug} onChange={event => setWorkspaceSlug(event.target.value)} placeholder="minha-produtora" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" /></label>{error && <div className="error">{error}</div>}<button disabled={busy} type="submit">Criar workspace <span>↗</span></button></form></main>;
+  if (!session)
+    return (
+      <main className="auth">
+        <section className="hero">
+          <span className="eyebrow">CLIPCON / CONTENT INTELLIGENCE</span>
+          <h1>Do episódio longo ao próximo momento que importa.</h1>
+          <p>
+            Produza, publique e aprenda com cada Short em um workspace feito
+            para criadores.
+          </p>
+        </section>
+        <form className="card login" onSubmit={signIn}>
+          <div>
+            <span className="eyebrow">WORKSPACE ACCESS</span>
+            <h2>Entrar no ClipCon</h2>
+            <p className="muted">Acesse seu workspace com segurança.</p>
+          </div>
+          <label>
+            E-mail
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+            />
+          </label>
+          <label>
+            Senha
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
+          {error && <div className="error">{error}</div>}
+          <button type="submit">
+            Entrar no workspace <span>↗</span>
+          </button>
+        </form>
+      </main>
+    );
+  if (mustChangePassword)
+    return (
+      <main className="auth">
+        <form className="card login" onSubmit={changePassword}>
+          <span className="eyebrow">SECURITY CHECK</span>
+          <h2>Atualize sua senha</h2>
+          <p className="muted">
+            Por segurança, altere a senha inicial antes de continuar.
+          </p>
+          <label>
+            Nova senha
+            <input
+              type="password"
+              minLength={12}
+              required
+              value={newPassword}
+              onChange={(event) => setNewPassword(event.target.value)}
+            />
+          </label>
+          {error && <div className="error">{error}</div>}
+          <button type="submit">
+            Salvar nova senha <span>↗</span>
+          </button>
+        </form>
+      </main>
+    );
+  if (!tenant)
+    return (
+      <main className="auth">
+        <form className="card login" onSubmit={createWorkspace}>
+          <span className="eyebrow">FIRST WORKSPACE</span>
+          <h2>Crie seu workspace</h2>
+          <p className="muted">
+            Um workspace mantém seus projetos e arquivos isolados.
+          </p>
+          <label>
+            Nome
+            <input
+              required
+              value={workspaceName}
+              onChange={(event) => setWorkspaceName(event.target.value)}
+              placeholder="Minha produtora"
+            />
+          </label>
+          <label>
+            Slug
+            <input
+              required
+              value={workspaceSlug}
+              onChange={(event) => setWorkspaceSlug(event.target.value)}
+              placeholder="minha-produtora"
+              pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
+            />
+          </label>
+          {error && <div className="error">{error}</div>}
+          <button disabled={busy} type="submit">
+            Criar workspace <span>↗</span>
+          </button>
+        </form>
+      </main>
+    );
 
-  return <div className="shell"><aside className="sidebar"><div className="brand"><b>CLIP</b>CON</div><div className="side-label">CLIPES</div><Nav active={view === 'home' ? 'home' : view === 'clips' ? 'clips' : view === 'performance' ? 'performance' : ''} onClick={setView} icon="⌂" label="Visão geral" value="home" /><Nav active={view} onClick={setView} icon="◈" label="Biblioteca" value="clips" /><Nav active={view} onClick={setView} icon="↗" label="Performance" value="performance" /><div className="side-label editor-label">EDITOR</div><Nav active={view} onClick={setView} icon="＋" label="Novo projeto" value="editor" /><Nav active={view} onClick={setView} icon="▦" label="Meus projetos" value="editor" /><div className="side-label system-label">SISTEMA</div><Nav active={view} onClick={setView} icon="◎" label="Integrações" value="settings" /><div className="sidebar-bottom"><span className="workspace-dot" />{tenant.name}<button className="logout" onClick={signOut}>Sair</button></div></aside><main className="workspace"><header className="topbar"><div><span className="eyebrow">{tenant.slug.toUpperCase()} / CLIPCON</span><h3>{view === 'home' ? 'Visão geral' : view === 'clips' ? 'Biblioteca de clipes' : view === 'performance' ? 'Performance' : view === 'editor' ? 'Editor de vídeo' : 'Configurações'}</h3></div><div className="header-right"><span className="workspace-label">{session.user.email}</span><div className="avatar">{session.user.email?.[0]?.toUpperCase()}</div></div></header>{view === 'home' && <Home projects={projects} clips={clips} onCreate={() => setShowProjectForm(true)} onNavigate={setView} onSelect={setSelectedClip} />}{view === 'clips' && <ClipsView clips={clips} onSelect={setSelectedClip} onCreate={() => setShowProjectForm(true)} />}{view === 'performance' && <PerformanceView tenantId={tenant.id} authFetch={authFetch} />}{view === 'editor' && (projects[0] ? <EditorWorkspace projectId={projects[0].id} projectName={projects[0].name} authFetch={authFetch} onExit={() => setView('home')} /> : <EditorView projects={projects} />)}{view === 'settings' && <Settings googleStatus={googleStatus} onConnect={connectIntegration} onDisconnect={disconnectIntegration} />}{showProjectForm && <ProjectModal busy={busy} name={projectName} url={sourceUrl} strategy={strategy} setName={setProjectName} setUrl={setSourceUrl} setStrategy={setStrategy} onClose={() => setShowProjectForm(false)} onSubmit={createProject} error={error} />}{selectedClip && <ClipPanel clip={selectedClip} authFetch={authFetch} onClose={() => setSelectedClip(null)} onSaved={loadClips} />}</main></div>;
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <b>CLIP</b>CON
+        </div>
+        <div className="side-label">CLIPES</div>
+        <Nav
+          active={
+            view === "home"
+              ? "home"
+              : view === "clips"
+                ? "clips"
+                : view === "performance"
+                  ? "performance"
+                  : ""
+          }
+          onClick={setView}
+          icon="⌂"
+          label="Visão geral"
+          value="home"
+        />
+        <Nav
+          active={view}
+          onClick={setView}
+          icon="◈"
+          label="Biblioteca"
+          value="clips"
+        />
+        <Nav
+          active={view}
+          onClick={setView}
+          icon="↗"
+          label="Performance"
+          value="performance"
+        />
+        <div className="side-label editor-label">EDITOR</div>
+        <Nav
+          active={view}
+          onClick={setView}
+          icon="＋"
+          label="Novo projeto"
+          value="editor"
+        />
+        <Nav
+          active={view}
+          onClick={setView}
+          icon="▦"
+          label="Meus projetos"
+          value="editor"
+        />
+        <div className="side-label system-label">SISTEMA</div>
+        <Nav
+          active={view}
+          onClick={setView}
+          icon="◎"
+          label="Integrações"
+          value="settings"
+        />
+        <Nav
+          active={view}
+          onClick={setView}
+          icon="◇"
+          label="AI Providers"
+          value="ai-providers"
+        />
+        <div className="sidebar-bottom">
+          <span className="workspace-dot" />
+          {tenant.name}
+          <button className="logout" onClick={signOut}>
+            Sair
+          </button>
+        </div>
+      </aside>
+      <main className="workspace">
+        <header className="topbar">
+          <div>
+            <span className="eyebrow">
+              {tenant.slug.toUpperCase()} / CLIPCON
+            </span>
+            <h3>
+              {view === "home"
+                ? "Visão geral"
+                : view === "clips"
+                  ? "Biblioteca de clipes"
+                  : view === "performance"
+                    ? "Performance"
+                    : view === "editor"
+                      ? "Editor de vídeo"
+                      : view === "ai-providers"
+                        ? "AI Providers"
+                        : "Configurações"}
+            </h3>
+          </div>
+          <div className="header-right">
+            <span className="workspace-label">{session.user.email}</span>
+            <div className="avatar">
+              {session.user.email?.[0]?.toUpperCase()}
+            </div>
+          </div>
+        </header>
+        {view === "home" && (
+          <Home
+            projects={projects}
+            clips={clips}
+            onCreate={() => setShowProjectForm(true)}
+            onNavigate={setView}
+            onSelect={setSelectedClip}
+          />
+        )}
+        {view === "clips" && (
+          <ClipsView
+            clips={clips}
+            onSelect={setSelectedClip}
+            onCreate={() => setShowProjectForm(true)}
+          />
+        )}
+        {view === "performance" && (
+          <PerformanceView tenantId={tenant.id} authFetch={authFetch} />
+        )}
+        {view === "editor" &&
+          (projects[0] ? (
+            <EditorWorkspace
+              projectId={projects[0].id}
+              projectName={projects[0].name}
+              authFetch={authFetch}
+              onExit={() => setView("home")}
+            />
+          ) : (
+            <EditorView projects={projects} />
+          ))}
+        {view === "settings" && (
+          <Settings
+            googleStatus={googleStatus}
+            onConnect={connectIntegration}
+            onDisconnect={disconnectIntegration}
+          />
+        )}
+        {view === "ai-providers" && <AiProvidersView authFetch={authFetch} />}
+        {showProjectForm && (
+          <ProjectModal
+            busy={busy}
+            name={projectName}
+            url={sourceUrl}
+            strategy={strategy}
+            setName={setProjectName}
+            setUrl={setSourceUrl}
+            setStrategy={setStrategy}
+            onClose={() => setShowProjectForm(false)}
+            onSubmit={createProject}
+            error={error}
+          />
+        )}
+        {selectedClip && (
+          <ClipPanel
+            clip={selectedClip}
+            authFetch={authFetch}
+            onClose={() => setSelectedClip(null)}
+            onSaved={loadClips}
+          />
+        )}
+      </main>
+    </div>
+  );
 }
 
-function Nav({ active, onClick, icon, label, value }: { active: string; onClick: (value: View) => void; icon: string; label: string; value: View }) { return <button className={`nav-item ${active === value ? 'active' : ''}`} onClick={() => onClick(value)}><span>{icon}</span>{label}</button>; }
-function Home({ projects, clips, onCreate, onNavigate, onSelect }: { projects: Project[]; clips: Clip[]; onCreate: () => void; onNavigate: (value: View) => void; onSelect: (clip: Clip) => void }) { const published = clips.filter(c => c.status === 'published').length; return <section className="page"><div className="page-intro"><div><span className="eyebrow">WORKSPACE / TODAY</span><h1>O que você quer criar?</h1><p>Escolha um ambiente e leve seu conteúdo para o próximo nível.</p></div><button onClick={onCreate}>Novo projeto <span>＋</span></button></div><div className="choice-grid"><button className="choice-card primary" onClick={onCreate}><span className="choice-icon">◈</span><strong>Criar Clipes</strong><p>Transforme vídeos longos em Shorts com análise, seleção e publicação assistidas por IA.</p><span className="choice-link">Começar agora ↗</span></button><button className="choice-card" onClick={() => onNavigate('editor')}><span className="choice-icon">✂</span><strong>Editar Vídeo</strong><p>Organize uma edição manual ou prepare o material para receber ajuda da IA.</p><span className="choice-link">Abrir editor ↗</span></button></div><div className="stats-row"><Stat label="Projetos" value={projects.length} /><Stat label="Clipes gerados" value={clips.length} /><Stat label="Publicados" value={published} /><Stat label="Views acumuladas" value={clips.reduce((sum, clip) => sum + Number(clip.performance?.views ?? 0), 0).toLocaleString('pt-BR')} /></div><section className="recent-section"><div className="section-heading"><div><span className="eyebrow">RECENTES</span><h2>Seus últimos clipes</h2></div><button className="text-button" onClick={() => onNavigate('clips')}>Ver biblioteca ↗</button></div>{clips.length ? <div className="clip-grid compact">{clips.slice(0, 3).map(clip => <ClipCard key={clip.id} clip={clip} onClick={() => onSelect(clip)} />)}</div> : <div className="empty card"><strong>Seu primeiro corte começa aqui.</strong><p>Adicione um vídeo do YouTube e deixe o pipeline encontrar os momentos que merecem continuar.</p><button onClick={onCreate}>Adicionar fonte <span>＋</span></button></div>}</section></section>; }
-function Stat({ label, value }: { label: string; value: string | number }) { return <div className="stat"><span>{label}</span><strong>{value}</strong></div>; }
-function ClipsView({ clips, onSelect, onCreate }: { clips: Clip[]; onSelect: (clip: Clip) => void; onCreate: () => void }) { return <section className="page"><div className="page-intro"><div><span className="eyebrow">CLIP LIBRARY</span><h1>Clipes que podem ir mais longe.</h1><p>Revise, avalie e acompanhe cada Short gerado pelo seu workspace.</p></div><button onClick={onCreate}>Novo projeto <span>＋</span></button></div><div className="toolbar"><span>{clips.length} clipe{clips.length === 1 ? '' : 's'}</span><select defaultValue="recent"><option value="recent">Mais recentes</option><option value="score">Melhor score</option><option value="views">Mais views</option></select></div>{clips.length ? <div className="clip-grid">{clips.map(clip => <ClipCard key={clip.id} clip={clip} onClick={() => onSelect(clip)} />)}</div> : <div className="empty card"><strong>Nenhum clipe gerado ainda.</strong><p>Crie um projeto para iniciar o pipeline.</p><button onClick={onCreate}>Criar projeto <span>＋</span></button></div>}</section>; }
-function ClipCard({ clip, onClick }: { clip: Clip; onClick: () => void }) { return <button className="clip-card" onClick={onClick}><div className="clip-thumb"><span>{clip.status === 'published' ? 'PUBLICADO' : clip.status.toUpperCase()}</span><b>{clip.duration_seconds ? `${Math.floor(clip.duration_seconds / 60).toString().padStart(2, '0')}:${Math.round(clip.duration_seconds % 60).toString().padStart(2, '0')}` : '--:--'}</b></div><div className="clip-copy"><strong>{clip.title}</strong><small>{clip.candidate?.category ?? 'Análise ClipCon'}</small><div className="clip-meta"><span>◉ {Number(clip.performance?.views ?? 0).toLocaleString('pt-BR')}</span><span>Score {clip.performance?.performance_score ?? clip.candidate?.score ?? '--'}</span></div></div></button>; }
-function PerformanceView({ tenantId, authFetch }: { tenantId: string; authFetch: (path: string, init?: RequestInit) => Promise<Response> }) { const [data, setData] = useState<any>(null); useEffect(() => { authFetch(`/v1/analytics/dashboard?tenant_id=${tenantId}`).then(r => r.ok ? r.json() : null).then(setData); }, [tenantId]); const m = data?.metrics; return <section className="page"><div className="page-intro"><div><span className="eyebrow">CLIPCON INTELLIGENCE</span><h1>O que está funcionando.</h1><p>Métricas reais do YouTube e padrões só aparecem quando existe amostra suficiente.</p></div></div><div className="stats-row performance-stats"><Stat label="Views totais" value={m?.totalViews?.toLocaleString('pt-BR') ?? '—'} /><Stat label="Inscritos gerados" value={m?.subscribersGained?.toLocaleString('pt-BR') ?? '—'} /><Stat label="Score médio" value={m?.averageScore ? Math.round(m.averageScore) : '—'} /><Stat label="Publicados" value={m?.published ?? '—'} /></div><div className="insight-layout"><div className="card insight-card"><span className="eyebrow">APRENDIZADO</span><h2>Padrões observados</h2>{data?.patterns?.length ? data.patterns.map((p: any) => <div className="insight" key={p.id}><strong>{p.name}</strong><p>{p.description}</p><small>Amostra: {p.sample_size} · Confiança: {Math.round(p.confidence * 100)}%</small></div>) : <div className="empty-inline"><strong>Dados insuficientes.</strong><p>O ClipCon só cria insights depois de observar publicações suficientes.</p></div>}</div><div className="card explain-card"><span className="eyebrow">MÉTODO</span><h2>Não é só view.</h2><p>O score futuro combina retenção, engagement, conversão em inscritos e velocidade. Cada métrica mantém histórico para não confundir alcance com qualidade.</p></div></div></section>; }
-function EditorView({ projects }: { projects: Project[] }) { return <section className="page editor-page"><div className="page-intro"><div><span className="eyebrow">EDITOR / BETA FOUNDATION</span><h1>Seu espaço de edição.</h1><p>Uma base persistente para organizar mídia e preparar a edição assistida por IA.</p></div><button disabled title="Edição manual avançada ainda não disponível">Importar mídia <span>＋</span></button></div><div className="editor-frame card"><aside className="editor-tools"><strong>Ferramentas</strong><span>◫ Mídia</span><span>✂ Cortar <em>em breve</em></span><span>T Texto <em>em breve</em></span><span>♬ Áudio <em>em breve</em></span><span>✦ IA <em>em breve</em></span></aside><div className="editor-canvas"><div className="canvas-empty"><span>◌</span><strong>Selecione uma mídia para começar</strong><p>Preview e timeline serão habilitados quando o projeto de edição persistente estiver conectado ao armazenamento.</p></div></div><aside className="editor-inspector"><strong>Inspector</strong><p>Selecione um elemento para editar suas propriedades.</p></aside><div className="timeline"><span>00:00</span><div className="timeline-line" /><span>00:30</span><span>01:00</span></div></div><div className="project-strip"><span className="eyebrow">PROJETOS DISPONÍVEIS</span>{projects.length ? projects.map(project => <span className="project-pill" key={project.id}>{project.name}</span>) : <span className="muted">Nenhum projeto criado.</span>}</div></section>; }
-function Settings({ googleStatus, onConnect, onDisconnect }: { googleStatus: { drive: IntegrationStatus; youtube: IntegrationStatus } | null; onConnect: (provider: 'drive' | 'youtube') => void; onDisconnect: (provider: 'drive' | 'youtube') => void }) { return <section className="page"><div className="page-intro"><div><span className="eyebrow">SYSTEM / INTEGRATIONS</span><h1>Conexões do workspace.</h1><p>Armazene resultados no Drive e publique no canal certo, com autorização explícita.</p></div></div><div className="settings-grid">{(['drive', 'youtube'] as const).map(provider => { const connected = googleStatus?.[provider]?.connected; return <div className="integration-card card" key={provider}><span className="integration-symbol">{provider === 'drive' ? '▤' : '▶'}</span><div><span className="eyebrow">{provider === 'drive' ? 'STORAGE' : 'PUBLISHING'}</span><h2>{provider === 'drive' ? 'Google Drive' : 'YouTube'}</h2><p>{connected ? `Conectado como ${googleStatus?.[provider].accountLabel ?? 'conta Google'}.` : 'Ainda não conectado neste workspace.'}</p></div><button onClick={() => connected ? onDisconnect(provider) : onConnect(provider)}>{connected ? 'Desconectar' : 'Conectar'} <span>↗</span></button></div>; })}</div></section>; }
-function ProjectModal({ busy, name, url, strategy, setName, setUrl, setStrategy, onClose, onSubmit, error }: { busy: boolean; name: string; url: string; strategy: string; setName: (v: string) => void; setUrl: (v: string) => void; setStrategy: (v: string) => void; onClose: () => void; onSubmit: (event: FormEvent) => void; error: string }) { return <div className="modal-backdrop"><form className="modal card" onSubmit={onSubmit}><div className="modal-head"><div><span className="eyebrow">NEW CLIP PROJECT</span><h2>Começar com uma fonte</h2></div><button type="button" className="icon-button" onClick={onClose}>×</button></div><label>Nome do projeto<input required value={name} onChange={e => setName(e.target.value)} placeholder="Podcast Ep. 42" /></label><label>URL do YouTube<input required type="url" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://youtube.com/watch?v=..." /></label><label>Estratégia<select value={strategy} onChange={e => setStrategy(e.target.value)}><option value="viral">Viral · hook, curiosidade e velocidade</option><option value="educational">Educacional · clareza e valor</option><option value="storytelling">Storytelling · tensão e payoff</option><option value="debate">Debate · conflito e discordância</option><option value="podcast">Podcast · frases memoráveis e histórias</option></select></label><p className="form-note">O pipeline fará download, transcrição, análise, seleção e renderização dos melhores momentos.</p>{error && <div className="error">{error}</div>}<button disabled={busy} type="submit">{busy ? 'Enfileirando...' : 'Enfileirar processamento'} <span>↗</span></button></form></div>; }
-function ClipPanel({ clip, authFetch, onClose, onSaved }: { clip: Clip; authFetch: (path: string, init?: RequestInit) => Promise<Response>; onClose: () => void; onSaved: () => void }) { const [rating, setRating] = useState<number | null>(null); const [comment, setComment] = useState(''); const [saved, setSaved] = useState(false); const [videoUrl, setVideoUrl] = useState(''); useEffect(() => { let url = ''; authFetch(`/v1/clips/${clip.id}/preview`).then(async response => { if (!response.ok) return; url = URL.createObjectURL(await response.blob()); setVideoUrl(url); }).catch(() => {}); return () => { if (url) URL.revokeObjectURL(url); }; }, [clip.id]); async function save() { if (!rating) return; const response = await authFetch(`/v1/clips/${clip.id}/feedback`, { method: 'POST', body: JSON.stringify({ rating, comment }) }); if (response.ok) { setSaved(true); onSaved(); } } return <div className="modal-backdrop"><section className="clip-panel"><button className="close-panel" onClick={onClose}>×</button><div className="preview-placeholder">{videoUrl ? <video controls autoPlay src={videoUrl} /> : <><span>▶</span><p>Preview do clipe</p><small>O preview aparece quando o arquivo estiver no Drive.</small></>}</div><div className="panel-content"><span className="eyebrow">CLIP REVIEW</span><h2>{clip.title}</h2><div className="review-facts"><span>{clip.duration_seconds ? `${Math.round(clip.duration_seconds)}s` : 'Duração pendente'}</span><span>Score {clip.candidate?.score ?? '—'}</span><span>{clip.status}</span></div><p className="hook">“{clip.candidate?.hook ?? 'Hook registrado pela análise aparecerá aqui.'}”</p><div className="feedback-box"><strong>O que você achou?</strong><div className="rating-row"><button className={rating === 1 ? 'selected' : ''} onClick={() => setRating(1)}>👍 Gostei</button><button className={rating === -1 ? 'selected negative' : ''} onClick={() => setRating(-1)}>👎 Não gostei</button></div><textarea value={comment} onChange={e => setComment(e.target.value)} placeholder="O começo ficou lento? O conflito funcionou? Diga à IA o que aprender." /><button disabled={!rating} onClick={save}>{saved ? 'Feedback salvo' : 'Salvar feedback'} <span>↗</span></button></div></div></section></div>; }
-function LoadingScreen() { return <main className="loading"><div className="loading-inner"><div className="loading-brand"><b>CLIP</b>CON</div><div className="loading-mark" /><p className="loading-message">Carregando seu ambiente...</p></div></main>; }
+function Nav({
+  active,
+  onClick,
+  icon,
+  label,
+  value,
+}: {
+  active: string;
+  onClick: (value: View) => void;
+  icon: string;
+  label: string;
+  value: View;
+}) {
+  return (
+    <button
+      className={`nav-item ${active === value ? "active" : ""}`}
+      onClick={() => onClick(value)}
+    >
+      <span>{icon}</span>
+      {label}
+    </button>
+  );
+}
+function Home({
+  projects,
+  clips,
+  onCreate,
+  onNavigate,
+  onSelect,
+}: {
+  projects: Project[];
+  clips: Clip[];
+  onCreate: () => void;
+  onNavigate: (value: View) => void;
+  onSelect: (clip: Clip) => void;
+}) {
+  const published = clips.filter((c) => c.status === "published").length;
+  return (
+    <section className="page">
+      <div className="page-intro">
+        <div>
+          <span className="eyebrow">WORKSPACE / TODAY</span>
+          <h1>O que você quer criar?</h1>
+          <p>Escolha um ambiente e leve seu conteúdo para o próximo nível.</p>
+        </div>
+        <button onClick={onCreate}>
+          Novo projeto <span>＋</span>
+        </button>
+      </div>
+      <div className="choice-grid">
+        <button className="choice-card primary" onClick={onCreate}>
+          <span className="choice-icon">◈</span>
+          <strong>Criar Clipes</strong>
+          <p>
+            Transforme vídeos longos em Shorts com análise, seleção e publicação
+            assistidas por IA.
+          </p>
+          <span className="choice-link">Começar agora ↗</span>
+        </button>
+        <button className="choice-card" onClick={() => onNavigate("editor")}>
+          <span className="choice-icon">✂</span>
+          <strong>Editar Vídeo</strong>
+          <p>
+            Organize uma edição manual ou prepare o material para receber ajuda
+            da IA.
+          </p>
+          <span className="choice-link">Abrir editor ↗</span>
+        </button>
+      </div>
+      <div className="stats-row">
+        <Stat label="Projetos" value={projects.length} />
+        <Stat label="Clipes gerados" value={clips.length} />
+        <Stat label="Publicados" value={published} />
+        <Stat
+          label="Views acumuladas"
+          value={clips
+            .reduce(
+              (sum, clip) => sum + Number(clip.performance?.views ?? 0),
+              0,
+            )
+            .toLocaleString("pt-BR")}
+        />
+      </div>
+      <section className="recent-section">
+        <div className="section-heading">
+          <div>
+            <span className="eyebrow">RECENTES</span>
+            <h2>Seus últimos clipes</h2>
+          </div>
+          <button className="text-button" onClick={() => onNavigate("clips")}>
+            Ver biblioteca ↗
+          </button>
+        </div>
+        {clips.length ? (
+          <div className="clip-grid compact">
+            {clips.slice(0, 3).map((clip) => (
+              <ClipCard
+                key={clip.id}
+                clip={clip}
+                onClick={() => onSelect(clip)}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="empty card">
+            <strong>Seu primeiro corte começa aqui.</strong>
+            <p>
+              Adicione um vídeo do YouTube e deixe o pipeline encontrar os
+              momentos que merecem continuar.
+            </p>
+            <button onClick={onCreate}>
+              Adicionar fonte <span>＋</span>
+            </button>
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+function Stat({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+function ClipsView({
+  clips,
+  onSelect,
+  onCreate,
+}: {
+  clips: Clip[];
+  onSelect: (clip: Clip) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <section className="page">
+      <div className="page-intro">
+        <div>
+          <span className="eyebrow">CLIP LIBRARY</span>
+          <h1>Clipes que podem ir mais longe.</h1>
+          <p>
+            Revise, avalie e acompanhe cada Short gerado pelo seu workspace.
+          </p>
+        </div>
+        <button onClick={onCreate}>
+          Novo projeto <span>＋</span>
+        </button>
+      </div>
+      <div className="toolbar">
+        <span>
+          {clips.length} clipe{clips.length === 1 ? "" : "s"}
+        </span>
+        <select defaultValue="recent">
+          <option value="recent">Mais recentes</option>
+          <option value="score">Melhor score</option>
+          <option value="views">Mais views</option>
+        </select>
+      </div>
+      {clips.length ? (
+        <div className="clip-grid">
+          {clips.map((clip) => (
+            <ClipCard
+              key={clip.id}
+              clip={clip}
+              onClick={() => onSelect(clip)}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="empty card">
+          <strong>Nenhum clipe gerado ainda.</strong>
+          <p>Crie um projeto para iniciar o pipeline.</p>
+          <button onClick={onCreate}>
+            Criar projeto <span>＋</span>
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+function ClipCard({ clip, onClick }: { clip: Clip; onClick: () => void }) {
+  return (
+    <button className="clip-card" onClick={onClick}>
+      <div className="clip-thumb">
+        <span>
+          {clip.status === "published"
+            ? "PUBLICADO"
+            : clip.status.toUpperCase()}
+        </span>
+        <b>
+          {clip.duration_seconds
+            ? `${Math.floor(clip.duration_seconds / 60)
+                .toString()
+                .padStart(2, "0")}:${Math.round(clip.duration_seconds % 60)
+                .toString()
+                .padStart(2, "0")}`
+            : "--:--"}
+        </b>
+      </div>
+      <div className="clip-copy">
+        <strong>{clip.title}</strong>
+        <small>{clip.candidate?.category ?? "Análise ClipCon"}</small>
+        <div className="clip-meta">
+          <span>
+            ◉ {Number(clip.performance?.views ?? 0).toLocaleString("pt-BR")}
+          </span>
+          <span>
+            Score{" "}
+            {clip.performance?.performance_score ??
+              clip.candidate?.score ??
+              "--"}
+          </span>
+        </div>
+      </div>
+    </button>
+  );
+}
+function PerformanceView({
+  tenantId,
+  authFetch,
+}: {
+  tenantId: string;
+  authFetch: (path: string, init?: RequestInit) => Promise<Response>;
+}) {
+  const [data, setData] = useState<any>(null);
+  useEffect(() => {
+    authFetch(`/v1/analytics/dashboard?tenant_id=${tenantId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setData);
+  }, [tenantId]);
+  const m = data?.metrics;
+  return (
+    <section className="page">
+      <div className="page-intro">
+        <div>
+          <span className="eyebrow">CLIPCON INTELLIGENCE</span>
+          <h1>O que está funcionando.</h1>
+          <p>
+            Métricas reais do YouTube e padrões só aparecem quando existe
+            amostra suficiente.
+          </p>
+        </div>
+      </div>
+      <div className="stats-row performance-stats">
+        <Stat
+          label="Views totais"
+          value={m?.totalViews?.toLocaleString("pt-BR") ?? "—"}
+        />
+        <Stat
+          label="Inscritos gerados"
+          value={m?.subscribersGained?.toLocaleString("pt-BR") ?? "—"}
+        />
+        <Stat
+          label="Score médio"
+          value={m?.averageScore ? Math.round(m.averageScore) : "—"}
+        />
+        <Stat label="Publicados" value={m?.published ?? "—"} />
+      </div>
+      <div className="insight-layout">
+        <div className="card insight-card">
+          <span className="eyebrow">APRENDIZADO</span>
+          <h2>Padrões observados</h2>
+          {data?.patterns?.length ? (
+            data.patterns.map((p: any) => (
+              <div className="insight" key={p.id}>
+                <strong>{p.name}</strong>
+                <p>{p.description}</p>
+                <small>
+                  Amostra: {p.sample_size} · Confiança:{" "}
+                  {Math.round(p.confidence * 100)}%
+                </small>
+              </div>
+            ))
+          ) : (
+            <div className="empty-inline">
+              <strong>Dados insuficientes.</strong>
+              <p>
+                O ClipCon só cria insights depois de observar publicações
+                suficientes.
+              </p>
+            </div>
+          )}
+        </div>
+        <div className="card explain-card">
+          <span className="eyebrow">MÉTODO</span>
+          <h2>Não é só view.</h2>
+          <p>
+            O score futuro combina retenção, engagement, conversão em inscritos
+            e velocidade. Cada métrica mantém histórico para não confundir
+            alcance com qualidade.
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+function EditorView({ projects }: { projects: Project[] }) {
+  return (
+    <section className="page editor-page">
+      <div className="page-intro">
+        <div>
+          <span className="eyebrow">EDITOR / BETA FOUNDATION</span>
+          <h1>Seu espaço de edição.</h1>
+          <p>
+            Uma base persistente para organizar mídia e preparar a edição
+            assistida por IA.
+          </p>
+        </div>
+        <button disabled title="Edição manual avançada ainda não disponível">
+          Importar mídia <span>＋</span>
+        </button>
+      </div>
+      <div className="editor-frame card">
+        <aside className="editor-tools">
+          <strong>Ferramentas</strong>
+          <span>◫ Mídia</span>
+          <span>
+            ✂ Cortar <em>em breve</em>
+          </span>
+          <span>
+            T Texto <em>em breve</em>
+          </span>
+          <span>
+            ♬ Áudio <em>em breve</em>
+          </span>
+          <span>
+            ✦ IA <em>em breve</em>
+          </span>
+        </aside>
+        <div className="editor-canvas">
+          <div className="canvas-empty">
+            <span>◌</span>
+            <strong>Selecione uma mídia para começar</strong>
+            <p>
+              Preview e timeline serão habilitados quando o projeto de edição
+              persistente estiver conectado ao armazenamento.
+            </p>
+          </div>
+        </div>
+        <aside className="editor-inspector">
+          <strong>Inspector</strong>
+          <p>Selecione um elemento para editar suas propriedades.</p>
+        </aside>
+        <div className="timeline">
+          <span>00:00</span>
+          <div className="timeline-line" />
+          <span>00:30</span>
+          <span>01:00</span>
+        </div>
+      </div>
+      <div className="project-strip">
+        <span className="eyebrow">PROJETOS DISPONÍVEIS</span>
+        {projects.length ? (
+          projects.map((project) => (
+            <span className="project-pill" key={project.id}>
+              {project.name}
+            </span>
+          ))
+        ) : (
+          <span className="muted">Nenhum projeto criado.</span>
+        )}
+      </div>
+    </section>
+  );
+}
+function Settings({
+  googleStatus,
+  onConnect,
+  onDisconnect,
+}: {
+  googleStatus: { drive: IntegrationStatus; youtube: IntegrationStatus } | null;
+  onConnect: (provider: "drive" | "youtube") => void;
+  onDisconnect: (provider: "drive" | "youtube") => void;
+}) {
+  return (
+    <section className="page">
+      <div className="page-intro">
+        <div>
+          <span className="eyebrow">SYSTEM / INTEGRATIONS</span>
+          <h1>Conexões do workspace.</h1>
+          <p>
+            Armazene resultados no Drive e publique no canal certo, com
+            autorização explícita.
+          </p>
+        </div>
+      </div>
+      <div className="settings-grid">
+        {(["drive", "youtube"] as const).map((provider) => {
+          const connected = googleStatus?.[provider]?.connected;
+          return (
+            <div className="integration-card card" key={provider}>
+              <span className="integration-symbol">
+                {provider === "drive" ? "▤" : "▶"}
+              </span>
+              <div>
+                <span className="eyebrow">
+                  {provider === "drive" ? "STORAGE" : "PUBLISHING"}
+                </span>
+                <h2>{provider === "drive" ? "Google Drive" : "YouTube"}</h2>
+                <p>
+                  {connected
+                    ? `Conectado como ${googleStatus?.[provider].accountLabel ?? "conta Google"}.`
+                    : "Ainda não conectado neste workspace."}
+                </p>
+              </div>
+              <button
+                onClick={() =>
+                  connected ? onDisconnect(provider) : onConnect(provider)
+                }
+              >
+                {connected ? "Desconectar" : "Conectar"} <span>↗</span>
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+function ProjectModal({
+  busy,
+  name,
+  url,
+  strategy,
+  setName,
+  setUrl,
+  setStrategy,
+  onClose,
+  onSubmit,
+  error,
+}: {
+  busy: boolean;
+  name: string;
+  url: string;
+  strategy: string;
+  setName: (v: string) => void;
+  setUrl: (v: string) => void;
+  setStrategy: (v: string) => void;
+  onClose: () => void;
+  onSubmit: (event: FormEvent) => void;
+  error: string;
+}) {
+  return (
+    <div className="modal-backdrop">
+      <form className="modal card" onSubmit={onSubmit}>
+        <div className="modal-head">
+          <div>
+            <span className="eyebrow">NEW CLIP PROJECT</span>
+            <h2>Começar com uma fonte</h2>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <label>
+          Nome do projeto
+          <input
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Podcast Ep. 42"
+          />
+        </label>
+        <label>
+          URL do YouTube
+          <input
+            required
+            type="url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://youtube.com/watch?v=..."
+          />
+        </label>
+        <label>
+          Estratégia
+          <select
+            value={strategy}
+            onChange={(e) => setStrategy(e.target.value)}
+          >
+            <option value="viral">
+              Viral · hook, curiosidade e velocidade
+            </option>
+            <option value="educational">Educacional · clareza e valor</option>
+            <option value="storytelling">Storytelling · tensão e payoff</option>
+            <option value="debate">Debate · conflito e discordância</option>
+            <option value="podcast">
+              Podcast · frases memoráveis e histórias
+            </option>
+          </select>
+        </label>
+        <p className="form-note">
+          O pipeline fará download, transcrição, análise, seleção e renderização
+          dos melhores momentos.
+        </p>
+        {error && <div className="error">{error}</div>}
+        <button disabled={busy} type="submit">
+          {busy ? "Enfileirando..." : "Enfileirar processamento"} <span>↗</span>
+        </button>
+      </form>
+    </div>
+  );
+}
+function ClipPanel({
+  clip,
+  authFetch,
+  onClose,
+  onSaved,
+}: {
+  clip: Clip;
+  authFetch: (path: string, init?: RequestInit) => Promise<Response>;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [rating, setRating] = useState<number | null>(null);
+  const [comment, setComment] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [videoUrl, setVideoUrl] = useState("");
+  useEffect(() => {
+    let url = "";
+    authFetch(`/v1/clips/${clip.id}/preview`)
+      .then(async (response) => {
+        if (!response.ok) return;
+        url = URL.createObjectURL(await response.blob());
+        setVideoUrl(url);
+      })
+      .catch(() => {});
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [clip.id]);
+  async function save() {
+    if (!rating) return;
+    const response = await authFetch(`/v1/clips/${clip.id}/feedback`, {
+      method: "POST",
+      body: JSON.stringify({ rating, comment }),
+    });
+    if (response.ok) {
+      setSaved(true);
+      onSaved();
+    }
+  }
+  return (
+    <div className="modal-backdrop">
+      <section className="clip-panel">
+        <button className="close-panel" onClick={onClose}>
+          ×
+        </button>
+        <div className="preview-placeholder">
+          {videoUrl ? (
+            <video controls autoPlay src={videoUrl} />
+          ) : (
+            <>
+              <span>▶</span>
+              <p>Preview do clipe</p>
+              <small>
+                O preview aparece quando o arquivo estiver no Drive.
+              </small>
+            </>
+          )}
+        </div>
+        <div className="panel-content">
+          <span className="eyebrow">CLIP REVIEW</span>
+          <h2>{clip.title}</h2>
+          <div className="review-facts">
+            <span>
+              {clip.duration_seconds
+                ? `${Math.round(clip.duration_seconds)}s`
+                : "Duração pendente"}
+            </span>
+            <span>Score {clip.candidate?.score ?? "—"}</span>
+            <span>{clip.status}</span>
+          </div>
+          <p className="hook">
+            “
+            {clip.candidate?.hook ??
+              "Hook registrado pela análise aparecerá aqui."}
+            ”
+          </p>
+          <div className="feedback-box">
+            <strong>O que você achou?</strong>
+            <div className="rating-row">
+              <button
+                className={rating === 1 ? "selected" : ""}
+                onClick={() => setRating(1)}
+              >
+                👍 Gostei
+              </button>
+              <button
+                className={rating === -1 ? "selected negative" : ""}
+                onClick={() => setRating(-1)}
+              >
+                👎 Não gostei
+              </button>
+            </div>
+            <textarea
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              placeholder="O começo ficou lento? O conflito funcionou? Diga à IA o que aprender."
+            />
+            <button disabled={!rating} onClick={save}>
+              {saved ? "Feedback salvo" : "Salvar feedback"} <span>↗</span>
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+function LoadingScreen() {
+  return (
+    <main className="loading">
+      <div className="loading-inner">
+        <div className="loading-brand">
+          <b>CLIP</b>CON
+        </div>
+        <div className="loading-mark" />
+        <p className="loading-message">Carregando seu ambiente...</p>
+      </div>
+    </main>
+  );
+}
 
-async function bootstrap() { try { const publicConfig = await loadPublicConfig(); supabase = createSupabaseClient(publicConfig); apiUrl = publicConfig.apiUrl ?? ''; createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>); } catch { document.getElementById('root')!.innerHTML = '<main class="auth"><section class="card login"><span class="eyebrow">CONFIGURATION ERROR</span><h2>Não foi possível carregar o workspace.</h2><p class="muted">A configuração pública do ClipCon não está disponível no momento.</p></section></main>'; } }
+async function bootstrap() {
+  try {
+    const publicConfig = await loadPublicConfig();
+    supabase = createSupabaseClient(publicConfig);
+    apiUrl = publicConfig.apiUrl ?? "";
+    createRoot(document.getElementById("root")!).render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+  } catch {
+    document.getElementById("root")!.innerHTML =
+      '<main class="auth"><section class="card login"><span class="eyebrow">CONFIGURATION ERROR</span><h2>Não foi possível carregar o workspace.</h2><p class="muted">A configuração pública do ClipCon não está disponível no momento.</p></section></main>';
+  }
+}
 bootstrap();
