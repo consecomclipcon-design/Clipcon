@@ -62,9 +62,9 @@ async function transcribeOne(key: string, model: string, filePath: string): Prom
   throw new Error('Transcription rate-limited after retries');
 }
 
-export async function transcribeAudio(filePath: string): Promise<{ text: string; segments: TranscriptSegment[] }> {
-  const key = requireGroqKey();
-  const model = config.GROQ_TRANSCRIPTION_MODEL;
+export async function transcribeAudio(filePath: string, options?: { key?: string; model?: string }): Promise<{ text: string; segments: TranscriptSegment[] }> {
+  const key = options?.key ?? requireGroqKey();
+  const model = options?.model ?? config.GROQ_TRANSCRIPTION_MODEL;
   if (!model) throw new Error('GROQ_TRANSCRIPTION_MODEL is not configured on the worker');
   const duration = await probeMediaDuration(filePath);
   if (duration <= CHUNK_SECONDS) return transcribeOne(key, model, filePath);
@@ -178,9 +178,9 @@ async function analyzeChunk(key: string, model: string, chunk: string): Promise<
   return parsed as ClipCandidate[];
 }
 
-export async function analyzeTranscript(transcriptText: string): Promise<ClipCandidate[]> {
-  const key = requireGroqKey();
-  const model = config.GROQ_ANALYSIS_MODEL;
+export async function analyzeTranscript(transcriptText: string, options?: { key?: string; model?: string }): Promise<ClipCandidate[]> {
+  const key = options?.key ?? requireGroqKey();
+  const model = options?.model ?? config.GROQ_ANALYSIS_MODEL;
   if (!model) throw new Error('GROQ_ANALYSIS_MODEL is not configured on the worker');
   const chunks = splitTranscript(transcriptText, MAX_ANALYZE_CHUNK_CHARS, ANALYZE_OVERLAP_CHARS);
   const all: ClipCandidate[] = [];

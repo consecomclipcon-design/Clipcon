@@ -7,6 +7,7 @@ import { config, listenPort } from './config.js';
 import { admin } from './supabase.js';
 import { createGoogleClient, encryptToken, fetchAccountLabel, getProviderScopes, getStoredToken, googleConfigured, signOAuthState, verifyOAuthState, type GoogleProvider } from './integrations/google.js';
 import { youtubeVideoId } from './youtube-url.js';
+import { saveProviderKey, type ProviderSlug } from './ai-providers.js';
 
 const app = Fastify({ bodyLimit: 500 * 1024 * 1024, logger: { redact: ['req.headers.authorization', 'req.headers.cookie'] } });
 await app.register(cors, { origin: config.WEB_ORIGIN });
@@ -52,16 +53,110 @@ app.post('/v1/tenants', async (request, reply) => {
   if (error) return reply.code(error.code === '23505' ? 409 : 400).send({ error: 'Could not create workspace' });
   const membership = await admin.from('tenant_members').insert({ tenant_id: tenant.id, user_id: request.user!.id, role: 'owner' });
   if (membership.error) { await admin.from('tenants').delete().eq('id', tenant.id); return reply.code(500).send({ error: 'Could not create workspace membership' }); }
-  return reply.code(201).send({ tenant });
+  const { data: workspace, error: workspaceError } = await admin.from('workspaces').insert({ tenant_id: tenant.id, name, slug, created_by: request.user!.id }).select('id, tenant_id, name, slug, description, settings').single();
+  if (workspaceError || !workspace) { await admin.from('tenants').delete().eq('id', tenant.id); return reply.code(500).send({ error: 'Could not create workspace configuration' }); }
+  await admin.from('workspace_members').insert({ workspace_id: workspace.id, tenant_id: tenant.id, user_id: request.user!.id, role: 'owner' });
+  await admin.from('brand_kits').insert({ tenant_id: tenant.id, workspace_id: workspace.id });
+  return reply.code(201).send({ tenant, workspace });
+});
+
+async function getWorkspaceForUser(workspaceId: string, userId: string) {
+  const { data } = await admin.from('workspaces').select('id, tenant_id, name, slug, description, avatar_url, settings, created_at, updated_at').eq('id', workspaceId).maybeSingle();
+  if (!data || !(await hasTenantMembership(userId, data.tenant_id))) return null;
+  return data;
+}
+
+app.get('/v1/workspaces', async request => {
+  const { data } = await admin.from('workspace_members').select('workspace_id, role, workspaces(id, tenant_id, name, slug, description, avatar_url, settings, created_at, updated_at)').eq('user_id', request.user!.id);
+  return { workspaces: (data ?? []).map(row => ({ ...(row.workspaces as object), role: row.role })) };
+});
+
+app.post('/v1/workspaces', async (request, reply) => {
+  const body = request.body as { tenant_id?: string; name?: string; slug?: string; description?: string };
+  if (!(await requireTenant(request, reply, body.tenant_id))) return;
+  if (!body.name?.trim() || !body.slug?.trim() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(body.slug)) return reply.code(400).send({ error: 'Valid workspace name and slug are required' });
+  const { data, error } = await admin.from('workspaces').insert({ tenant_id: body.tenant_id, name: body.name.trim(), slug: body.slug, description: body.description?.trim() || null, created_by: request.user!.id }).select('id, tenant_id, name, slug, description, avatar_url, settings').single();
+  if (error) return reply.code(error.code === '23505' ? 409 : 400).send({ error: 'Could not create workspace' });
+  await admin.from('workspace_members').insert({ workspace_id: data.id, tenant_id: body.tenant_id, user_id: request.user!.id, role: 'owner' });
+  await admin.from('brand_kits').insert({ tenant_id: body.tenant_id, workspace_id: data.id });
+  return reply.code(201).send({ workspace: data });
+});
+
+app.get('/v1/workspaces/:workspaceId', async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: 'Workspace not found' });
+  const [{ data: brandKit }, { data: integrations }] = await Promise.all([
+    admin.from('brand_kits').select('id, name, config, updated_at').eq('workspace_id', workspace.id).maybeSingle(),
+    admin.from('integrations').select('provider, account_email, metadata, connected_at, last_error').eq('tenant_id', workspace.tenant_id).in('provider', ['drive', 'youtube']),
+  ]);
+  return { workspace, brandKit, integrations: integrations ?? [] };
+});
+
+app.patch('/v1/workspaces/:workspaceId', async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: 'Workspace not found' });
+  const body = request.body as { name?: string; description?: string; avatar_url?: string; settings?: Record<string, unknown> };
+  const { data, error } = await admin.from('workspaces').update({ ...(body.name?.trim() ? { name: body.name.trim() } : {}), ...(body.description !== undefined ? { description: body.description?.trim() || null } : {}), ...(body.avatar_url !== undefined ? { avatar_url: body.avatar_url || null } : {}), ...(body.settings ? { settings: body.settings } : {}), updated_at: new Date().toISOString() }).eq('id', workspace.id).select('id, tenant_id, name, slug, description, avatar_url, settings, updated_at').single();
+  if (error) return reply.code(400).send({ error: 'Could not update workspace' });
+  return { workspace: data };
+});
+
+app.get('/v1/workspaces/:workspaceId/brand-kit', async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: 'Workspace not found' });
+  const { data, error } = await admin.from('brand_kits').select('id, name, config, updated_at').eq('workspace_id', workspace.id).single();
+  if (error) return reply.code(503).send({ error: 'Brand Kit unavailable' });
+  return { brandKit: data };
+});
+
+app.put('/v1/workspaces/:workspaceId/brand-kit', async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: 'Workspace not found' });
+  const body = request.body as { name?: string; config?: Record<string, unknown> };
+  if (!body.config || typeof body.config !== 'object') return reply.code(400).send({ error: 'Brand Kit config is required' });
+  const { data, error } = await admin.from('brand_kits').upsert({ tenant_id: workspace.tenant_id, workspace_id: workspace.id, name: body.name?.trim() || 'Default Brand Kit', config: body.config, updated_at: new Date().toISOString() }, { onConflict: 'workspace_id' }).select('id, name, config, updated_at').single();
+  if (error) return reply.code(400).send({ error: 'Could not save Brand Kit' });
+  return { brandKit: data };
+});
+
+app.get('/v1/ai/providers', async request => {
+  const { data: providers } = await admin.from('ai_providers').select('id, slug, name, base_url, status').order('name');
+  const { data: keys } = await admin.from('ai_provider_keys').select('provider_id, status').eq('created_by', request.user!.id);
+  const counts = new Map<string, number>();
+  for (const key of keys ?? []) if (key.status === 'active') counts.set(key.provider_id, (counts.get(key.provider_id) ?? 0) + 1);
+  return { providers: (providers ?? []).map(provider => ({ ...provider, activeKeys: counts.get(provider.id) ?? 0 })) };
+});
+
+app.get('/v1/workspaces/:workspaceId/ai/providers/:provider/keys', async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: 'Workspace not found' });
+  const { data, error } = await admin.from('ai_provider_keys').select('id, masked_key, status, default_model_id, allowed_capabilities, last_error, last_used_at, cooldown_until, created_at, ai_providers!inner(slug, name), ai_models(model_name, capabilities)').eq('workspace_id', workspace.id).eq('ai_providers.slug', (request.params as { provider: string }).provider);
+  if (error) return reply.code(503).send({ error: 'Provider keys unavailable' });
+  return { keys: data ?? [] };
+});
+
+app.post('/v1/workspaces/:workspaceId/ai/providers/:provider/keys', async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: 'Workspace not found' });
+  const provider = (request.params as { provider: string }).provider as ProviderSlug;
+  if (!['groq', 'openai', 'nvidia'].includes(provider)) return reply.code(400).send({ error: 'Provider adapter is not available' });
+  const body = request.body as { api_key?: string; default_model?: string; capabilities?: string[] };
+  if (!body.api_key?.trim()) return reply.code(400).send({ error: 'API key is required' });
+  try { return reply.code(201).send(await saveProviderKey({ tenantId: workspace.tenant_id, workspaceId: workspace.id, userId: request.user!.id, provider, secret: body.api_key.trim(), defaultModel: body.default_model, capabilities: body.capabilities })); }
+  catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Could not validate provider key' }); }
 });
 app.post('/v1/projects', async (request, reply) => {
-  const body = request.body as { tenant_id?: string; name?: string; description?: string; strategy?: string; strategy_config?: Record<string, unknown>; source_url?: string };
+  const body = request.body as { tenant_id?: string; workspace_id?: string; name?: string; description?: string; strategy?: string; strategy_config?: Record<string, unknown>; source_url?: string };
   const tenantId = body?.tenant_id; const sourceUrl = body?.source_url?.trim(); const name = body?.name?.trim();
   const videoId = sourceUrl ? youtubeVideoId(sourceUrl) : null;
   if (!tenantId || !sourceUrl || !name || !videoId) return reply.code(400).send({ error: 'Project name, tenant and valid YouTube URL are required' });
   const { data: membership } = await admin.from('tenant_members').select('tenant_id').eq('tenant_id', tenantId).eq('user_id', request.user!.id).maybeSingle();
   if (!membership) return reply.code(403).send({ error: 'Tenant access required' });
-  const { data: project, error: projectError } = await admin.from('projects').insert({ tenant_id: tenantId, name, description: body.description?.trim() || null, strategy: body.strategy ?? 'viral', strategy_config: body.strategy_config ?? {}, created_by: request.user!.id }).select('id, tenant_id, name, description, strategy, strategy_config, status, created_at').single();
+  const { data: workspace } = body.workspace_id
+    ? await admin.from('workspaces').select('id, tenant_id').eq('id', body.workspace_id).eq('tenant_id', tenantId).maybeSingle()
+    : await admin.from('workspaces').select('id, tenant_id').eq('tenant_id', tenantId).order('created_at').limit(1).maybeSingle();
+  if (!workspace) return reply.code(400).send({ error: 'Workspace is required and must belong to the tenant' });
+  const { data: project, error: projectError } = await admin.from('projects').insert({ tenant_id: tenantId, workspace_id: workspace.id, name, description: body.description?.trim() || null, strategy: body.strategy ?? 'viral', strategy_config: body.strategy_config ?? {}, created_by: request.user!.id }).select('id, tenant_id, workspace_id, name, description, strategy, strategy_config, status, created_at').single();
   if (projectError) return reply.code(400).send({ error: 'Could not create project' });
   const { data: video, error: videoError } = await admin.from('source_videos').insert({ tenant_id: tenantId, project_id: project.id, youtube_video_id: videoId, source_url: sourceUrl }).select('id, status').single();
   if (videoError) { await admin.from('projects').delete().eq('id', project.id); return reply.code(videoError.code === '23505' ? 409 : 400).send({ error: videoError.code === '23505' ? 'This video is already registered in this workspace' : 'Could not register source video' }); }

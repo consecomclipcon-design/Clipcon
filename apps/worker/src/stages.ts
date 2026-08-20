@@ -8,6 +8,7 @@ import { downloadVideo, extractAudio, inspectMedia, renderClip, renderSequence, 
 import { transcribeAudio, analyzeTranscript } from './groq.js';
 import { fetchYoutubeVideoMetrics, uploadFileToDrive, uploadVideoToYouTube } from './google.js';
 import { calculatePerformanceScore } from './performance.js';
+import { resolveAiCredential, recordAiUsage } from './ai-orchestrator.js';
 
 export type Job = {
   id: string;
@@ -58,7 +59,11 @@ export async function handleTranscribe(supabase: SupabaseClient, job: Job) {
   const { data: video, error } = await supabase.from('source_videos').select('id, audio_path').eq('id', job.source_video_id).single();
   if (error || !video?.audio_path) throw new Error('No audio available; re-run extraction stage');
   await setProgress(supabase, job, 30);
-  const result = await transcribeAudio(video.audio_path);
+  const credential = await resolveAiCredential(supabase, job.tenant_id, job.project_id, 'TRANSCRIPTION');
+  const startedAt = Date.now();
+  let result;
+  try { result = await transcribeAudio(video.audio_path, { key: credential.secret, model: credential.model }); await recordAiUsage(supabase, credential, job.tenant_id, job.project_id, 'transcription', 'success', Date.now() - startedAt); }
+  catch (error) { await recordAiUsage(supabase, credential, job.tenant_id, job.project_id, 'transcription', 'error', Date.now() - startedAt, error instanceof Error ? error.name : 'AI_ERROR'); throw error; }
   const { data: tr, error: trErr } = await supabase.from('transcriptions').upsert({ tenant_id: job.tenant_id, source_video_id: video.id, language: 'pt-BR', model: config.GROQ_TRANSCRIPTION_MODEL ?? 'groq', status: 'completed' }, { onConflict: 'source_video_id' }).select('id').single();
   if (trErr) throw new Error('Could not save transcription: ' + trErr.message);
   const segRows = result.segments.filter(s => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start).map((s, i) => ({ tenant_id: job.tenant_id, transcription_id: tr.id, segment_index: i, start_seconds: s.start, end_seconds: s.end, text_content: s.text }));
@@ -78,7 +83,11 @@ export async function handleAnalyze(supabase: SupabaseClient, job: Job) {
   if (!segments?.length) throw new Error('Transcription has no segments');
   const transcriptText = segments.map(s => `[${s.start_seconds}-${s.end_seconds}] ${s.text_content}`).join('\n');
   await setProgress(supabase, job, 55);
-  const candidates = await analyzeTranscript(transcriptText);
+  const credential = await resolveAiCredential(supabase, job.tenant_id, job.project_id, 'TEXT_GENERATION');
+  const startedAt = Date.now();
+  let candidates;
+  try { candidates = await analyzeTranscript(transcriptText, { key: credential.secret, model: credential.model }); await recordAiUsage(supabase, credential, job.tenant_id, job.project_id, 'clip_analysis', 'success', Date.now() - startedAt); }
+  catch (error) { await recordAiUsage(supabase, credential, job.tenant_id, job.project_id, 'clip_analysis', 'error', Date.now() - startedAt, error instanceof Error ? error.name : 'AI_ERROR'); throw error; }
   const rows = candidates.filter(c => Number.isFinite(c.start) && Number.isFinite(c.end)).map(c => {
     const start = Math.max(0, c.start);
     const end = Math.min(c.end, start + 120);
@@ -209,9 +218,14 @@ export async function handleAiEdit(supabase: SupabaseClient, job: Job) {
     const sourcePath = join(workDir, 'source.mp4');
     await writeFile(sourcePath, Buffer.from(await downloaded.data.arrayBuffer()));
     const audioPath = await extractAudio(sourcePath, workDir);
-    const transcript = await transcribeAudio(audioPath);
-    const transcriptText = transcript.segments.map(segment => `[${segment.start}-${segment.end}] ${segment.text}`).join('\n');
-    const candidates = (await analyzeTranscript(transcriptText)).filter(candidate => candidate.end > candidate.start && candidate.end - candidate.start >= 30).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+     const transcriptionCredential = await resolveAiCredential(supabase, job.tenant_id, run.project_id, 'TRANSCRIPTION');
+     const transcriptionStartedAt = Date.now();
+     const transcript = await transcribeAudio(audioPath, { key: transcriptionCredential.secret, model: transcriptionCredential.model });
+     await recordAiUsage(supabase, transcriptionCredential, job.tenant_id, run.project_id, 'ai_edit_transcription', 'success', Date.now() - transcriptionStartedAt);
+     const transcriptText = transcript.segments.map(segment => `[${segment.start}-${segment.end}] ${segment.text}`).join('\n');
+     const analysisCredential = await resolveAiCredential(supabase, job.tenant_id, run.project_id, 'TEXT_GENERATION');
+     const analysisStartedAt = Date.now();
+     const candidates = (await analyzeTranscript(transcriptText, { key: analysisCredential.secret, model: analysisCredential.model }).then(result => { void recordAiUsage(supabase, analysisCredential, job.tenant_id, run.project_id, 'ai_edit_analysis', 'success', Date.now() - analysisStartedAt); return result; })).filter(candidate => candidate.end > candidate.start && candidate.end - candidate.start >= 30).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
     const selected: Array<{ start: number; end: number; score?: number; title?: string; hook?: string }> = [];
     for (const candidate of candidates) {
       if (selected.some(other => Math.min(candidate.end, other.end) - Math.max(candidate.start, other.start) > 10)) continue;

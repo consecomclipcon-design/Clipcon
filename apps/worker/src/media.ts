@@ -79,7 +79,7 @@ export async function renderSequence(segments: SequenceSegment[], outPath: strin
     const path = join(workDir, `segment-${index}.mp4`);
     const speed = Math.max(0.25, Math.min(4, segment.speed ?? 1));
     const timelineStart = segment.timelineStart ?? 0;
-    const filters = [`scale=${width}:${height}:force_original_aspect_ratio=decrease`, `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`];
+    const filters = [`scale=${width}:${height}:force_original_aspect_ratio=increase`, `crop=${width}:${height}:(iw-${width})/2:(ih-${height})/2`];
     for (const overlay of segment.overlays ?? []) {
       const start = Math.max(0, overlay.startSeconds - timelineStart);
       const end = Math.min(segment.durationSeconds, overlay.endSeconds - timelineStart);
@@ -115,8 +115,8 @@ export async function extractAudio(videoPath: string, workDir: string): Promise<
 export async function renderClip(videoPath: string, startSec: number, endSec: number, outPath: string, vertical = true): Promise<string> {
   const duration = Math.max(1, Math.round(endSec - startSec));
   const filter = vertical
-    ? 'scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2'
-    : 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2';
+    ? 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920:(iw-1080)/2:(ih-1920)/2'
+    : 'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080:(iw-1920)/2:(ih-1080)/2';
   await execFileAsync('ffmpeg', ['-y', '-ss', String(startSec), '-i', videoPath, '-t', String(duration), '-vf', filter + ',fps=30', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outPath], { timeout: 5 * 60_000 });
   return outPath;
 }

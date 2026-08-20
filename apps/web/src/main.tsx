@@ -10,7 +10,7 @@ type Tenant = { id: string; name: string; slug: string; status: string };
 type Project = { id: string; name: string; description?: string | null; strategy?: string; status: string; created_at: string };
 type IntegrationStatus = { configured: boolean; connected: boolean; accountEmail: string | null; accountLabel: string | null; lastError: string | null };
 type Clip = { id: string; project_id: string; title: string; status: string; duration_seconds?: number | null; candidate?: { start_seconds: number; end_seconds: number; score: number; hook?: string; reason?: string; category?: string }; performance?: { views: number; likes: number; comments: number; subscribers_gained?: number; average_percentage_viewed?: number; performance_score?: number } | null; publication?: { youtube_video_id?: string; youtube_url?: string; status: string } | null };
-type View = 'home' | 'clips' | 'performance' | 'editor' | 'settings';
+type View = 'home' | 'clips' | 'performance' | 'editor' | 'settings' | 'ai-providers';
 
 let supabase: ReturnType<typeof createSupabaseClient> = null;
 let apiUrl = '';
