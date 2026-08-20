@@ -86,9 +86,39 @@ app.get('/v1/projects/:projectId/assets', async (request, reply) => {
   const { projectId } = request.params as { projectId: string };
   const project = await getProjectForUser(projectId, request.user!.id);
   if (!project) return reply.code(404).send({ error: 'Project not found' });
-  const { data, error } = await admin.from('media_assets').select('id, name, kind, mime_type, storage_path, size_bytes, duration_seconds, width, height, fps, status, error_message, metadata, created_at, updated_at').eq('project_id', projectId).order('created_at', { ascending: false });
+  const { data, error } = await admin.from('media_assets').select('id, name, kind, mime_type, storage_path, folder_id, size_bytes, duration_seconds, width, height, fps, status, error_message, metadata, created_at, updated_at').eq('project_id', projectId).order('created_at', { ascending: false });
   if (error) return reply.code(503).send({ error: 'Media assets are temporarily unavailable' });
   return { assets: data ?? [] };
+});
+
+app.get('/v1/projects/:projectId/folders', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const { data, error } = await admin.from('media_folders').select('id, name, parent_id, created_at').eq('project_id', projectId).order('name');
+  if (error) return reply.code(503).send({ error: 'Folders are temporarily unavailable' });
+  return { folders: data ?? [] };
+});
+
+app.post('/v1/projects/:projectId/folders', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const body = request.body as { name?: string; parent_id?: string | null };
+  if (!body.name?.trim()) return reply.code(400).send({ error: 'Folder name is required' });
+  const { data, error } = await admin.from('media_folders').insert({ tenant_id: project.tenant_id, project_id: projectId, parent_id: body.parent_id ?? null, name: body.name.trim(), created_by: request.user!.id }).select('id, name, parent_id, created_at').single();
+  if (error) return reply.code(error.code === '23505' ? 409 : 400).send({ error: 'Could not create folder' });
+  return reply.code(201).send({ folder: data });
+});
+
+app.patch('/v1/assets/:assetId', async (request, reply) => {
+  const { assetId } = request.params as { assetId: string };
+  const body = request.body as { folder_id?: string | null; name?: string };
+  const { data: asset } = await admin.from('media_assets').select('tenant_id, project_id').eq('id', assetId).maybeSingle();
+  if (!asset || !(await hasTenantMembership(request.user!.id, asset.tenant_id))) return reply.code(404).send({ error: 'Asset not found' });
+  const { data, error } = await admin.from('media_assets').update({ folder_id: body.folder_id ?? null, ...(body.name?.trim() ? { name: body.name.trim() } : {}), updated_at: new Date().toISOString() }).eq('id', assetId).select('id, name, folder_id, updated_at').single();
+  if (error) return reply.code(400).send({ error: 'Could not update asset' });
+  return { asset: data };
 });
 
 app.post('/v1/projects/:projectId/assets', async (request, reply) => {
@@ -132,7 +162,22 @@ app.get('/v1/projects/:projectId/sequence', async (request, reply) => {
     sequence = result.data;
   }
   if (!sequence) return reply.code(503).send({ error: 'Could not load editor sequence' });
-  return { sequence };
+  const { data: captions } = await admin.from('editor_captions').select('id, start_seconds, end_seconds, text_content, style').eq('sequence_id', sequence.id).order('start_seconds');
+  return { sequence, captions: captions ?? [] };
+});
+
+app.put('/v1/projects/:projectId/captions', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const body = request.body as { captions?: Array<{ id?: string; start_seconds: number; end_seconds: number; text_content: string; style?: Record<string, unknown> }> };
+  const { data: sequence } = await admin.from('editor_sequences').select('id').eq('project_id', projectId).single();
+  if (!sequence || !Array.isArray(body.captions)) return reply.code(400).send({ error: 'A sequence and captions are required' });
+  await admin.from('editor_captions').delete().eq('sequence_id', sequence.id);
+  const rows = body.captions.filter(c => c.text_content?.trim() && c.end_seconds > c.start_seconds).map(c => ({ tenant_id: project.tenant_id, sequence_id: sequence.id, start_seconds: c.start_seconds, end_seconds: c.end_seconds, text_content: c.text_content.trim(), style: c.style ?? {} }));
+  const { data, error } = rows.length ? await admin.from('editor_captions').insert(rows).select('id, start_seconds, end_seconds, text_content, style') : { data: [], error: null };
+  if (error) return reply.code(400).send({ error: 'Could not save captions' });
+  return { captions: data ?? [] };
 });
 
 app.put('/v1/projects/:projectId/sequence', async (request, reply) => {

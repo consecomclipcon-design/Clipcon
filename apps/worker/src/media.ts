@@ -68,7 +68,8 @@ export async function inspectMedia(path: string) {
   return { durationSeconds: Number(data.format?.duration ?? 0) || null, width: video?.width ?? null, height: video?.height ?? null, fps: rate?.length === 2 && rate[1] ? rate[0] / rate[1] : null };
 }
 
-export type SequenceSegment = { inputPath: string; startSeconds: number; durationSeconds: number; speed?: number };
+export type SequenceOverlay = { text: string; startSeconds: number; endSeconds: number; fontSize?: number; color?: string };
+export type SequenceSegment = { inputPath: string; startSeconds: number; durationSeconds: number; timelineStart?: number; speed?: number; overlays?: SequenceOverlay[] };
 
 export async function renderSequence(segments: SequenceSegment[], outPath: string, workDir: string, width: number, height: number) {
   if (!segments.length) throw new Error('Cannot export an empty sequence');
@@ -77,7 +78,16 @@ export async function renderSequence(segments: SequenceSegment[], outPath: strin
     const segment = segments[index];
     const path = join(workDir, `segment-${index}.mp4`);
     const speed = Math.max(0.25, Math.min(4, segment.speed ?? 1));
-    const args = ['-y', '-i', segment.inputPath, '-ss', String(Math.max(0, segment.startSeconds)), '-t', String(Math.max(0.05, segment.durationSeconds * speed)), '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`, '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '2', '-crf', '23', '-c:a', 'aac', '-b:a', '128k'];
+    const timelineStart = segment.timelineStart ?? 0;
+    const filters = [`scale=${width}:${height}:force_original_aspect_ratio=decrease`, `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`];
+    for (const overlay of segment.overlays ?? []) {
+      const start = Math.max(0, overlay.startSeconds - timelineStart);
+      const end = Math.min(segment.durationSeconds, overlay.endSeconds - timelineStart);
+      if (end <= 0 || start >= segment.durationSeconds) continue;
+      const text = overlay.text.replace(/[\\':,]/g, match => `\\${match}`).replace(/\n/g, ' ');
+      filters.push(`drawtext=text='${text}':fontcolor=${overlay.color ?? 'white'}:fontsize=${overlay.fontSize ?? 48}:x=(w-text_w)/2:y=h-text_h-80:box=1:boxcolor=black@0.55:enable='between(t\\,${start}\\,${end})'`);
+    }
+    const args = ['-y', '-i', segment.inputPath, '-ss', String(Math.max(0, segment.startSeconds)), '-t', String(Math.max(0.05, segment.durationSeconds * speed)), '-vf', filters.join(','), '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '2', '-crf', '23', '-c:a', 'aac', '-b:a', '128k'];
     if (speed !== 1) args.push('-af', `atempo=${speed}`);
     args.push('-movflags', '+faststart', path);
     await execFileAsync('ffmpeg', args, { timeout: 10 * 60_000 });

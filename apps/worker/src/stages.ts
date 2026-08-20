@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.js';
-import { downloadVideo, extractAudio, inspectMedia, renderClip, renderSequence, readFileBuffer } from './media.js';
+import { downloadVideo, extractAudio, inspectMedia, renderClip, renderSequence, readFileBuffer, type SequenceOverlay } from './media.js';
 import { transcribeAudio, analyzeTranscript } from './groq.js';
 import { fetchYoutubeVideoMetrics, uploadFileToDrive, uploadVideoToYouTube } from './google.js';
 import { calculatePerformanceScore } from './performance.js';
@@ -255,8 +255,11 @@ export async function handleExportSequence(supabase: SupabaseClient, job: Job) {
   await supabase.from('editor_exports').update({ status: 'processing' }).eq('id', exportId);
   try {
     const { data: sequence } = await supabase.from('editor_sequences').select('state, width, height').eq('id', exportRow.sequence_id).single();
-    const state = sequence?.state as { tracks?: Array<{ type?: string; clips?: Array<{ assetId: string; sourceStart?: number; duration?: number; start?: number; speed?: number }> }> } | null;
+    const state = sequence?.state as { tracks?: Array<{ type?: string; clips?: Array<{ assetId?: string; text?: string; sourceStart?: number; duration?: number; start?: number; speed?: number; fontSize?: number; color?: string }> }> } | null;
     const timeline = (state?.tracks ?? []).flatMap(track => (track.type === 'video' ? track.clips ?? [] : [])).filter(clip => clip.assetId && Number(clip.duration ?? 0) > 0).sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
+    const overlays: SequenceOverlay[] = (state?.tracks ?? []).flatMap(track => track.type === 'text' ? track.clips ?? [] : []).filter(clip => clip.text && Number(clip.duration ?? 0) > 0).map(clip => ({ text: clip.text!, startSeconds: clip.start ?? 0, endSeconds: (clip.start ?? 0) + (clip.duration ?? 0), fontSize: clip.fontSize, color: clip.color }));
+    const { data: captions } = await supabase.from('editor_captions').select('start_seconds, end_seconds, text_content, style').eq('sequence_id', exportRow.sequence_id).order('start_seconds');
+    overlays.push(...(captions ?? []).map(caption => ({ text: caption.text_content, startSeconds: caption.start_seconds, endSeconds: caption.end_seconds, fontSize: Number((caption.style as { fontSize?: number })?.fontSize ?? 48), color: String((caption.style as { color?: string })?.color ?? 'white') })));
     if (!timeline.length) throw new Error('Sequence has no video clips to export');
     const assetIds = [...new Set(timeline.map(clip => clip.assetId))];
     const { data: assets } = await supabase.from('media_assets').select('id, storage_path').in('id', assetIds);
@@ -270,7 +273,7 @@ export async function handleExportSequence(supabase: SupabaseClient, job: Job) {
       paths.set(asset.id, path);
     }
     const outputPath = join(workDir, 'export.mp4');
-    await renderSequence(timeline.map(clip => ({ inputPath: paths.get(clip.assetId)!, startSeconds: clip.sourceStart ?? 0, durationSeconds: clip.duration!, speed: clip.speed ?? 1 })), outputPath, workDir, sequence?.width ?? 1080, sequence?.height ?? 1920);
+    await renderSequence(timeline.map(clip => ({ inputPath: paths.get(clip.assetId!)!, startSeconds: clip.sourceStart ?? 0, durationSeconds: clip.duration!, timelineStart: clip.start ?? 0, speed: clip.speed ?? 1, overlays })), outputPath, workDir, sequence?.width ?? 1080, sequence?.height ?? 1920);
     const outputBuffer = await readFileBuffer(outputPath);
     const storagePath = `${exportRow.tenant_id}/${exportRow.project_id}/exports/${exportId}.mp4`;
     const uploaded = await supabase.storage.from('clipcon-media').upload(storagePath, outputBuffer, { contentType: 'video/mp4', upsert: true });
