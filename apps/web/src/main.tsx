@@ -5,6 +5,7 @@ import { createSupabaseClient } from "./lib/supabase";
 import { loadPublicConfig } from "./config";
 import { EditorWorkspace } from "./EditorWorkspace";
 import { AiProvidersView } from "./AiProvidersView";
+import { BrandKitView } from "./BrandKitView";
 import "./styles.css";
 
 type Tenant = { id: string; name: string; slug: string; status: string };
@@ -501,11 +502,14 @@ function App() {
             <EditorView projects={projects} />
           ))}
         {view === "settings" && (
-          <Settings
-            googleStatus={googleStatus}
-            onConnect={connectIntegration}
-            onDisconnect={disconnectIntegration}
-          />
+          <>
+            <Settings
+              googleStatus={googleStatus}
+              onConnect={connectIntegration}
+              onDisconnect={disconnectIntegration}
+            />
+            <BrandKitView authFetch={authFetch} />
+          </>
         )}
         {view === "ai-providers" && <AiProvidersView authFetch={authFetch} />}
         {showProjectForm && (
