@@ -1,5 +1,6 @@
 import json
 import glob
+import os
 import sys
 
 import cv2
@@ -14,7 +15,8 @@ def detect(video_path, start, duration):
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     if width <= 0 or height <= 0:
         raise RuntimeError("smart crop could not read video dimensions")
-    cascade_paths = glob.glob("/usr/**/haarcascade_frontalface_default.xml", recursive=True)
+    embedded = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "haarcascade_frontalface_default.xml")
+    cascade_paths = [embedded] if os.path.exists(embedded) else glob.glob("/usr/**/haarcascade_frontalface_default.xml", recursive=True)
     if not cascade_paths:
         raise RuntimeError("smart crop face cascade is not installed")
     face = cv2.CascadeClassifier(cascade_paths[0])
