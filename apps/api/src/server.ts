@@ -10,7 +10,9 @@ import { youtubeVideoId } from './youtube-url.js';
 
 const app = Fastify({ bodyLimit: 500 * 1024 * 1024, logger: { redact: ['req.headers.authorization', 'req.headers.cookie'] } });
 await app.register(cors, { origin: config.WEB_ORIGIN });
-app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
+for (const mediaType of ['application/octet-stream', 'video/mp4', 'video/quicktime', 'video/webm', 'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/x-m4a', 'image/jpeg', 'image/png']) {
+  app.addContentTypeParser(mediaType, { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
+}
 const webRoot = resolve(new URL('../../web/dist', import.meta.url).pathname);
 app.get('/health', async () => ({ status: 'ok', service: 'clipcon-api' }));
 app.get('/config.js', async (_request, reply) => reply.type('text/javascript; charset=utf-8').header('cache-control', 'no-store').send(`window.__CLIPCON_CONFIG__=${JSON.stringify({ supabaseUrl: process.env.VITE_SUPABASE_URL, supabasePublishableKey: process.env.VITE_SUPABASE_PUBLISHABLE_KEY, apiUrl: process.env.VITE_API_URL })};`));
@@ -70,7 +72,7 @@ app.post('/v1/projects', async (request, reply) => {
 
 const supportedMedia = new Map([
   ['video/mp4', 'video'], ['video/quicktime', 'video'], ['video/webm', 'video'],
-  ['audio/mpeg', 'audio'], ['audio/wav', 'audio'], ['audio/x-wav', 'audio'], ['audio/mp4', 'audio'], ['audio/m4a', 'audio'],
+  ['audio/mpeg', 'audio'], ['audio/wav', 'audio'], ['audio/x-wav', 'audio'], ['audio/mp4', 'audio'], ['audio/x-m4a', 'audio'], ['audio/m4a', 'audio'],
   ['image/jpeg', 'image'], ['image/png', 'image'],
 ]);
 
