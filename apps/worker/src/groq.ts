@@ -84,7 +84,7 @@ export async function transcribeAudio(filePath: string, options?: { key?: string
   return { text: texts.join('\n'), segments };
 }
 
-export type ClipCandidate = { start: number; end: number; title?: string; hook?: string; reason?: string; category?: string; score?: number; musicRisk?: number; contextRisk?: number };
+export type ClipCandidate = { start: number; end: number; title?: string; headlineOptions?: string[]; hook?: string; reason?: string; category?: string; score?: number; musicRisk?: number; contextRisk?: number };
 
 function extractJsonArray(content: string): unknown {
   const cleaned = content.replace(/```json\s*/g, '').replace(/```/g, '').trim();
@@ -165,7 +165,7 @@ async function analyzeChunk(key: string, model: string, chunk: string): Promise<
   const content = await chatCompletion(key, {
     model,
     messages: [
-      { role: 'system', content: 'You are a viral, monetizable YouTube Shorts clip selector. You are given part of a transcript with timestamped segments ([start-end] text). Before choosing any timestamps, read the whole chunk and understand what is being said. Return up to 3 clip suggestions, each 60 to 90 seconds long (you may go up to 120 seconds only if the content is exceptional, and never choose 15-30 seconds just because it is easier). Choose clips that work completely on their own: start on a strong hook and end on a conclusion, punchline, reveal or strong phrase. Avoid segments that are predominantly music or instrumental, silent, intros, outros, greetings, cut-off mid-sentence, or that lack context. Prefer different moments within this chunk. Return ONLY valid JSON: an array of objects with keys start, end, title, hook, reason, category (tema), score (0-100), music_risk (0-100, how likely the segment is predominantly music), context_risk (0-100, how likely the segment lacks sufficient context). If there are no good clips in this chunk, return an empty array - never invent timestamps.' },
+       { role: 'system', content: 'You are a viral, monetizable YouTube Shorts clip selector. You are given part of a transcript with timestamped segments ([start-end] text). Before choosing any timestamps, read the whole chunk and understand what is being said. Return up to 3 clip suggestions, each 45 to 90 seconds long (you may go up to 120 seconds only if the content is exceptional, and never choose 15-30 seconds just because it is easier). Choose clips that work completely on their own: start on a strong hook and end on a conclusion, punchline, reveal or strong phrase. Avoid segments that are predominantly music or instrumental, silent, intros, outros, greetings, cut-off mid-sentence, or that lack context. Prefer different moments within this chunk. Generate up to 3 short, truthful headline options based only on the selected content. Return ONLY valid JSON: an array of objects with keys start, end, title, headline_options, hook, reason, category (tema), score (0-100), music_risk (0-100, how likely the segment is predominantly music), context_risk (0-100, how likely the segment lacks sufficient context). If there are no good clips in this chunk, return an empty array - never invent timestamps.' },
       { role: 'user', content: chunk },
     ],
     temperature: 0.3,

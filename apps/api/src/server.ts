@@ -332,6 +332,31 @@ app.get('/v1/projects/:projectId/ai-edit', async (request, reply) => {
   return { runs: data ?? [] };
 });
 
+app.post('/v1/projects/:projectId/clip-studio', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const { data: projectDetails } = await admin.from('projects').select('workspace_id').eq('id', projectId).single();
+  const body = request.body as { asset_id?: string; duration_preset?: string; format?: string; style?: string; brand_kit_id?: string };
+  const { data: asset } = body.asset_id ? await admin.from('media_assets').select('id, status, kind').eq('id', body.asset_id).eq('project_id', projectId).maybeSingle() : { data: null };
+  if (!projectDetails?.workspace_id || !asset || asset.status !== 'ready' || asset.kind !== 'video') return reply.code(400).send({ error: 'A ready video asset and project workspace are required' });
+  const settings = { duration_preset: body.duration_preset ?? '45-90', format: body.format ?? 'full_screen', style: body.style ?? 'retention', brand_kit_id: body.brand_kit_id ?? null };
+  const { data: run, error } = await admin.from('clip_studio_runs').insert({ tenant_id: project.tenant_id, workspace_id: projectDetails.workspace_id, project_id: projectId, asset_id: asset.id, settings, created_by: request.user!.id }).select('id, status, settings, created_at').single();
+  if (error || !run) return reply.code(503).send({ error: 'Could not create Clip Studio run' });
+  const { error: queueError } = await admin.from('processing_jobs').insert({ tenant_id: project.tenant_id, project_id: projectId, type: 'clip_studio', artifacts: { runId: run.id, assetId: asset.id } });
+  if (queueError) return reply.code(503).send({ error: 'Could not queue Clip Studio run' });
+  return reply.code(202).send({ run });
+});
+
+app.get('/v1/projects/:projectId/clip-studio', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const { data, error } = await admin.from('clip_studio_runs').select('id, asset_id, settings, status, candidates_count, clips_count, error_message, created_at, completed_at').eq('project_id', projectId).order('created_at', { ascending: false }).limit(10);
+  if (error) return reply.code(503).send({ error: 'Clip Studio runs unavailable' });
+  return { runs: data ?? [] };
+});
+
 app.get('/v1/projects/:projectId', async (request, reply) => {
   const { projectId } = request.params as { projectId: string };
   const { data: project, error } = await admin.from('projects').select('id, tenant_id, name, description, strategy, strategy_config, status, created_at, updated_at').eq('id', projectId).single();

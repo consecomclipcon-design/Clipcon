@@ -95,7 +95,7 @@ export async function handleAnalyze(supabase: SupabaseClient, job: Job) {
     const score = Math.min(100, Math.max(0, Math.round(c.score ?? 50)));
     const musicRisk = c.musicRisk !== undefined && Number.isFinite(c.musicRisk) ? Math.min(100, Math.max(0, Math.round(c.musicRisk))) : null;
     const contextRisk = c.contextRisk !== undefined && Number.isFinite(c.contextRisk) ? Math.min(100, Math.max(0, Math.round(c.contextRisk))) : null;
-    return { tenant_id: job.tenant_id, project_id: job.project_id, source_video_id: job.source_video_id, start_seconds: start, end_seconds: end, score, title: c.title ?? 'Clip', reason: c.reason ?? null, hook: c.hook ?? null, category: c.category ?? null, music_risk: musicRisk, context_risk: contextRisk, feature_snapshot: { score, title: c.title ?? null, reason: c.reason ?? null, hook: c.hook ?? null, category: c.category ?? null, music_risk: musicRisk, context_risk: contextRisk }, status: 'candidate' };
+    return { tenant_id: job.tenant_id, project_id: job.project_id, source_video_id: job.source_video_id, start_seconds: start, end_seconds: end, score, title: c.title ?? 'Clip', headline_options: Array.isArray(c.headlineOptions) ? c.headlineOptions.slice(0, 3) : [], reason: c.reason ?? null, hook: c.hook ?? null, category: c.category ?? null, music_risk: musicRisk, context_risk: contextRisk, feature_snapshot: { score, title: c.title ?? null, headline_options: c.headlineOptions ?? [], reason: c.reason ?? null, hook: c.hook ?? null, category: c.category ?? null, music_risk: musicRisk, context_risk: contextRisk }, status: 'candidate' };
   }).filter((row): row is NonNullable<typeof row> => row !== null);
   if (!rows.length) throw new Error('Analysis produced no usable candidates');
   const { error: insErr } = await supabase.from('clip_candidates').insert(rows);
@@ -340,6 +340,65 @@ export async function handleExportSequence(supabase: SupabaseClient, job: Job) {
   } catch (exportError) {
     const message = exportError instanceof Error ? exportError.message : 'Could not export sequence';
     await supabase.from('editor_exports').update({ status: 'error', error_message: message }).eq('id', exportId);
+    throw new Error(message);
+  }
+}
+
+export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
+  const runId = job.artifacts.runId as string;
+  const assetId = job.artifacts.assetId as string;
+  if (!runId || !assetId) throw new Error('clip_studio job is missing run or asset');
+  const { data: run } = await supabase.from('clip_studio_runs').select('id, tenant_id, workspace_id, project_id, asset_id, settings, created_by').eq('id', runId).single();
+  const { data: asset } = await supabase.from('media_assets').select('storage_path, status, kind').eq('id', assetId).single();
+  if (!run || !asset || asset.status !== 'ready' || asset.kind !== 'video') throw new Error('Clip Studio input asset is unavailable');
+  await supabase.from('clip_studio_runs').update({ status: 'processing', error_message: null }).eq('id', runId);
+  try {
+    const downloaded = await supabase.storage.from('clipcon-media').download(asset.storage_path);
+    if (downloaded.error || !downloaded.data) throw new Error('Could not download Clip Studio asset');
+    const workDir = await mkdtemp(join(tmpdir(), 'clipcon-studio-'));
+    const sourcePath = join(workDir, 'source.mp4');
+    await writeFile(sourcePath, Buffer.from(await downloaded.data.arrayBuffer()));
+    const audioPath = await extractAudio(sourcePath, workDir);
+    const transcriptionCredential = await resolveAiCredential(supabase, job.tenant_id, run.project_id, 'TRANSCRIPTION');
+    const transcribeStarted = Date.now();
+    const transcript = await transcribeAudio(audioPath, { key: transcriptionCredential.secret, model: transcriptionCredential.model });
+    await recordAiUsage(supabase, transcriptionCredential, job.tenant_id, run.project_id, 'clip_studio_transcription', 'success', Date.now() - transcribeStarted);
+    const text = transcript.segments.map(segment => `[${segment.start}-${segment.end}] ${segment.text}`).join('\n');
+    const analysisCredential = await resolveAiCredential(supabase, job.tenant_id, run.project_id, 'TEXT_GENERATION');
+    const analyzeStarted = Date.now();
+    const candidates = await analyzeTranscript(text, { key: analysisCredential.secret, model: analysisCredential.model });
+    await recordAiUsage(supabase, analysisCredential, job.tenant_id, run.project_id, 'clip_studio_analysis', 'success', Date.now() - analyzeStarted);
+    const usable = candidates.filter(candidate => candidate.end > candidate.start && candidate.end - candidate.start >= 30 && candidate.end - candidate.start <= 120).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    const selected: typeof usable = [];
+    for (const candidate of usable) {
+      if (selected.some(other => Math.min(candidate.end, other.end) - Math.max(candidate.start, other.start) > 8)) continue;
+      selected.push(candidate);
+      if (selected.length >= 5) break;
+    }
+    if (!selected.length) throw new Error('Clip Studio found no independent moments with a valid payoff');
+    const candidateRows = selected.map(candidate => ({ tenant_id: run.tenant_id, project_id: run.project_id, source_video_id: null, start_seconds: candidate.start, end_seconds: candidate.end, score: Math.min(100, Math.max(0, Math.round(candidate.score ?? 50))), title: candidate.title ?? 'Clip', headline_options: candidate.headlineOptions ?? [], reason: candidate.reason ?? null, hook: candidate.hook ?? null, category: candidate.category ?? null, music_risk: candidate.musicRisk ?? null, context_risk: candidate.contextRisk ?? null, feature_snapshot: { headline_options: candidate.headlineOptions ?? [], source_asset_id: assetId }, format: (run.settings as { format?: string }).format ?? 'full_screen', status: 'selected' }));
+    const { data: savedCandidates, error: candidateError } = await supabase.from('clip_candidates').insert(candidateRows).select('id');
+    if (candidateError || !savedCandidates) throw new Error('Could not save Clip Studio candidates');
+    const clips: string[] = [];
+    for (let index = 0; index < selected.length; index++) {
+      const candidate = selected[index];
+      const candidateRow = savedCandidates[index];
+      const renderedPath = join(workDir, `clip-${index}.mp4`);
+      await renderClip(sourcePath, candidate.start, candidate.end, renderedPath, true);
+      const buffer = await readFileBuffer(renderedPath);
+      const outputPath = `${run.tenant_id}/${run.project_id}/clip-studio/${run.id}/${candidateRow.id}.mp4`;
+      const uploaded = await supabase.storage.from('clipcon-media').upload(outputPath, buffer, { contentType: 'video/mp4', upsert: true });
+      if (uploaded.error) throw new Error('Could not store Clip Studio output');
+      const { data: outputAsset, error: outputError } = await supabase.from('media_assets').insert({ tenant_id: run.tenant_id, project_id: run.project_id, name: `${candidate.title ?? 'clip'}-${index + 1}.mp4`, kind: 'video', mime_type: 'video/mp4', storage_path: outputPath, size_bytes: buffer.length, duration_seconds: Math.round((candidate.end - candidate.start) * 1000) / 1000, width: 1080, height: 1920, status: 'ready', metadata: { source_asset_id: assetId, clip_studio_run_id: run.id }, created_by: run.created_by }).select('id').single();
+      if (outputError || !outputAsset) throw new Error('Could not register Clip Studio output');
+      const { data: clip, error: clipError } = await supabase.from('clips').insert({ tenant_id: run.tenant_id, workspace_id: run.workspace_id, project_id: run.project_id, candidate_id: candidateRow.id, output_asset_id: outputAsset.id, title: candidate.title ?? `Clip ${index + 1}`, headline: candidate.headlineOptions?.[0] ?? candidate.title ?? null, description: candidate.reason ?? '', status: 'ready', format: (run.settings as { format?: string }).format ?? 'full_screen', duration_seconds: Math.round((candidate.end - candidate.start) * 1000) / 1000 }).select('id').single();
+      if (clipError || !clip) throw new Error('Could not register Clip Studio clip');
+      clips.push(clip.id);
+    }
+    await supabase.from('clip_studio_runs').update({ status: 'completed', candidates_count: selected.length, clips_count: clips.length, completed_at: new Date().toISOString() }).eq('id', run.id);
+  } catch (studioError) {
+    const message = studioError instanceof Error ? studioError.message : 'Clip Studio failed';
+    await supabase.from('clip_studio_runs').update({ status: 'error', error_message: message }).eq('id', run.id);
     throw new Error(message);
   }
 }
