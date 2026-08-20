@@ -159,6 +159,15 @@ app.post('/v1/projects/:projectId/exports', async (request, reply) => {
   return reply.code(202).send({ export: exportJob });
 });
 
+app.get('/v1/projects/:projectId/exports', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const { data, error } = await admin.from('editor_exports').select('id, status, asset_id, error_message, created_at, completed_at').eq('project_id', projectId).order('created_at', { ascending: false }).limit(10);
+  if (error) return reply.code(503).send({ error: 'Exports are temporarily unavailable' });
+  return { exports: data ?? [] };
+});
+
 app.get('/v1/projects/:projectId', async (request, reply) => {
   const { projectId } = request.params as { projectId: string };
   const { data: project, error } = await admin.from('projects').select('id, tenant_id, name, description, strategy, strategy_config, status, created_at, updated_at').eq('id', projectId).single();
