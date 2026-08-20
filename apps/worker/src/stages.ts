@@ -499,12 +499,30 @@ export async function handlePublishYoutube(supabase: SupabaseClient, job: Job) {
   if (!clipId) throw new Error("publish_youtube job is missing clipId");
   const { data: clip, error } = await supabase
     .from("clips")
-    .select("id, local_path, title, description")
+    .select("id, local_path, title, description, output_asset_id")
     .eq("id", clipId)
     .single();
-  if (error || !clip?.local_path) throw new Error("Rendered clip not found");
+  if (error || !clip) throw new Error("Rendered clip not found");
   await setProgress(supabase, job, 97);
-  const data = await readFileBuffer(clip.local_path);
+  let data: Buffer;
+  if (clip.local_path) {
+    data = await readFileBuffer(clip.local_path);
+  } else if (clip.output_asset_id) {
+    const { data: output } = await supabase
+      .from("media_assets")
+      .select("storage_path")
+      .eq("id", clip.output_asset_id)
+      .single();
+    if (!output?.storage_path) throw new Error("Clip output asset not found");
+    const downloaded = await supabase.storage
+      .from("clipcon-media")
+      .download(output.storage_path);
+    if (downloaded.error || !downloaded.data)
+      throw new Error("Could not download clip output for publishing");
+    data = Buffer.from(await downloaded.data.arrayBuffer());
+  } else {
+    throw new Error("Clip has no render to publish");
+  }
   const uploaded = await uploadVideoToYouTube(
     supabase,
     job.tenant_id,
@@ -1459,6 +1477,13 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
       if (clipError || !clip)
         throw new Error("Could not register Clip Studio clip");
       clips.push(clip.id);
+    }
+    if ((run.settings as { auto_publish?: boolean }).auto_publish) {
+      for (const clipId of clips) {
+        await enqueueNext(supabase, job, "publish_youtube", null, {
+          clipId,
+        });
+      }
     }
     await supabase
       .from("clip_studio_runs")

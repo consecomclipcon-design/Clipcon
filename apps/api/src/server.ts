@@ -1043,6 +1043,7 @@ app.post("/v1/projects/:projectId/clip-studio", async (request, reply) => {
     brand_kit_id?: string;
     secondary_asset_id?: string;
     secondary_ratio?: number;
+    auto_publish?: boolean;
   };
   const { data: asset } = body.asset_id
     ? await admin
@@ -1088,6 +1089,7 @@ app.post("/v1/projects/:projectId/clip-studio", async (request, reply) => {
       0.8,
       Math.max(0.2, Number(body.secondary_ratio ?? 0.5)),
     ),
+    auto_publish: Boolean(body.auto_publish),
   };
   const { data: run, error } = await admin
     .from("clip_studio_runs")
