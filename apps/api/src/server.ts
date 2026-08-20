@@ -1041,12 +1041,22 @@ app.post("/v1/projects/:projectId/clip-studio", async (request, reply) => {
     format?: string;
     style?: string;
     brand_kit_id?: string;
+    secondary_asset_id?: string;
+    secondary_ratio?: number;
   };
   const { data: asset } = body.asset_id
     ? await admin
         .from("media_assets")
         .select("id, status, kind")
         .eq("id", body.asset_id)
+        .eq("project_id", projectId)
+        .maybeSingle()
+    : { data: null };
+  const { data: secondaryAsset } = body.secondary_asset_id
+    ? await admin
+        .from("media_assets")
+        .select("id, status, kind")
+        .eq("id", body.secondary_asset_id)
         .eq("project_id", projectId)
         .maybeSingle()
     : { data: null };
@@ -1059,11 +1069,25 @@ app.post("/v1/projects/:projectId/clip-studio", async (request, reply) => {
     return reply.code(400).send({
       error: "A ready video asset and project workspace are required",
     });
+  if (
+    body.secondary_asset_id &&
+    (!secondaryAsset ||
+      secondaryAsset.status !== "ready" ||
+      secondaryAsset.kind !== "video")
+  )
+    return reply
+      .code(400)
+      .send({ error: "The secondary video asset must be ready" });
   const settings = {
     duration_preset: body.duration_preset ?? "45-90",
     format: body.format ?? "full_screen",
     style: body.style ?? "retention",
     brand_kit_id: body.brand_kit_id ?? null,
+    secondary_asset_id: secondaryAsset?.id ?? null,
+    secondary_ratio: Math.min(
+      0.8,
+      Math.max(0.2, Number(body.secondary_ratio ?? 0.5)),
+    ),
   };
   const { data: run, error } = await admin
     .from("clip_studio_runs")
@@ -1083,7 +1107,11 @@ app.post("/v1/projects/:projectId/clip-studio", async (request, reply) => {
     tenant_id: project.tenant_id,
     project_id: projectId,
     type: "clip_studio",
-    artifacts: { runId: run.id, assetId: asset.id },
+    artifacts: {
+      runId: run.id,
+      assetId: asset.id,
+      secondaryAssetId: secondaryAsset?.id ?? null,
+    },
   });
   if (queueError)
     return reply.code(503).send({ error: "Could not queue Clip Studio run" });
