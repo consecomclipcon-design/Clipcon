@@ -14,13 +14,14 @@ RUN npm run build --workspace apps/api && npm run build --workspace apps/web && 
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-RUN apk add --no-cache ffmpeg python3 py3-pip deno fontconfig ttf-dejavu && pip3 install --break-system-packages --upgrade yt-dlp
+RUN apk add --no-cache ffmpeg python3 py3-pip py3-opencv deno fontconfig ttf-dejavu && pip3 install --break-system-packages --upgrade yt-dlp
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/apps/api/package.json apps/api/package.json
 COPY --from=build /app/apps/api/dist apps/api/dist
 COPY --from=build /app/apps/worker/package.json apps/worker/package.json
 COPY --from=build /app/apps/worker/dist apps/worker/dist
+COPY --from=build /app/apps/worker/scripts apps/worker/scripts
 COPY --from=build /app/apps/web/dist apps/web/dist
 COPY --from=build /app/apps/web/server.mjs apps/web/server.mjs
 COPY railway-entrypoint.sh ./railway-entrypoint.sh
