@@ -77,7 +77,10 @@ export async function renderSequence(segments: SequenceSegment[], outPath: strin
     const segment = segments[index];
     const path = join(workDir, `segment-${index}.mp4`);
     const speed = Math.max(0.25, Math.min(4, segment.speed ?? 1));
-    await execFileAsync('ffmpeg', ['-y', '-ss', String(Math.max(0, segment.startSeconds)), '-i', segment.inputPath, '-t', String(Math.max(0.05, segment.durationSeconds * speed)), '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`, '-af', `atempo=${speed}`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', path], { timeout: 10 * 60_000 });
+    const args = ['-y', '-i', segment.inputPath, '-ss', String(Math.max(0, segment.startSeconds)), '-t', String(Math.max(0.05, segment.durationSeconds * speed)), '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`, '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '2', '-crf', '23', '-c:a', 'aac', '-b:a', '128k'];
+    if (speed !== 1) args.push('-af', `atempo=${speed}`);
+    args.push('-movflags', '+faststart', path);
+    await execFileAsync('ffmpeg', args, { timeout: 10 * 60_000 });
     rendered.push(path);
   }
   const concatFile = join(workDir, 'concat.txt');
