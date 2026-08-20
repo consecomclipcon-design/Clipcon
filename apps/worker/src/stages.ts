@@ -1,9 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './config.js';
-import { downloadVideo, extractAudio, renderClip, readFileBuffer } from './media.js';
+import { downloadVideo, extractAudio, inspectMedia, renderClip, renderSequence, readFileBuffer } from './media.js';
 import { transcribeAudio, analyzeTranscript } from './groq.js';
 import { fetchYoutubeVideoMetrics, uploadFileToDrive, uploadVideoToYouTube } from './google.js';
 import { calculatePerformanceScore } from './performance.js';
@@ -223,4 +223,64 @@ export async function handleAnalyzePerformance(supabase: SupabaseClient, job: Jo
     ? await supabase.from('learning_patterns').update(values).eq('id', existing.id)
     : await supabase.from('learning_patterns').insert(values);
   if (result.error) throw new Error('Could not save learning baseline: ' + result.error.message);
+}
+
+export async function handleProcessAsset(supabase: SupabaseClient, job: Job) {
+  const assetId = job.artifacts.assetId as string;
+  if (!assetId) throw new Error('process_asset job is missing assetId');
+  const { data: asset, error } = await supabase.from('media_assets').select('id, storage_path, mime_type').eq('id', assetId).single();
+  if (error || !asset) throw new Error('Media asset not found');
+  await supabase.from('media_assets').update({ status: 'processing', error_message: null, updated_at: new Date().toISOString() }).eq('id', assetId);
+  try {
+    const downloaded = await supabase.storage.from('clipcon-media').download(asset.storage_path);
+    if (downloaded.error || !downloaded.data) throw new Error(downloaded.error?.message ?? 'Could not download media asset');
+    const workDir = await mkdtemp(join(tmpdir(), 'clipcon-asset-'));
+    const localPath = join(workDir, 'source');
+    await writeFile(localPath, Buffer.from(await downloaded.data.arrayBuffer()));
+    const details = await inspectMedia(localPath);
+    const { error: updateError } = await supabase.from('media_assets').update({ status: 'ready', duration_seconds: details.durationSeconds, width: details.width, height: details.height, fps: details.fps, metadata: { processed_path: localPath }, updated_at: new Date().toISOString() }).eq('id', assetId);
+    if (updateError) throw new Error(updateError.message);
+  } catch (assetError) {
+    const message = assetError instanceof Error ? assetError.message : 'Could not process media asset';
+    await supabase.from('media_assets').update({ status: 'error', error_message: message, updated_at: new Date().toISOString() }).eq('id', assetId);
+    throw new Error(message);
+  }
+}
+
+export async function handleExportSequence(supabase: SupabaseClient, job: Job) {
+  const exportId = job.artifacts.exportId as string;
+  if (!exportId) throw new Error('export_sequence job is missing exportId');
+  const { data: exportRow, error } = await supabase.from('editor_exports').select('id, tenant_id, project_id, sequence_id, created_by').eq('id', exportId).single();
+  if (error || !exportRow) throw new Error('Editor export not found');
+  await supabase.from('editor_exports').update({ status: 'processing' }).eq('id', exportId);
+  try {
+    const { data: sequence } = await supabase.from('editor_sequences').select('state, width, height').eq('id', exportRow.sequence_id).single();
+    const state = sequence?.state as { tracks?: Array<{ type?: string; clips?: Array<{ assetId: string; sourceStart?: number; duration?: number; start?: number; speed?: number }> }> } | null;
+    const timeline = (state?.tracks ?? []).flatMap(track => (track.type === 'video' ? track.clips ?? [] : [])).filter(clip => clip.assetId && Number(clip.duration ?? 0) > 0).sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
+    if (!timeline.length) throw new Error('Sequence has no video clips to export');
+    const assetIds = [...new Set(timeline.map(clip => clip.assetId))];
+    const { data: assets } = await supabase.from('media_assets').select('id, storage_path').in('id', assetIds);
+    const paths = new Map<string, string>();
+    const workDir = await mkdtemp(join(tmpdir(), 'clipcon-export-'));
+    for (const asset of assets ?? []) {
+      const downloaded = await supabase.storage.from('clipcon-media').download(asset.storage_path);
+      if (downloaded.error || !downloaded.data) throw new Error('Could not download source asset for export');
+      const path = join(workDir, asset.id);
+      await writeFile(path, Buffer.from(await downloaded.data.arrayBuffer()));
+      paths.set(asset.id, path);
+    }
+    const outputPath = join(workDir, 'export.mp4');
+    await renderSequence(timeline.map(clip => ({ inputPath: paths.get(clip.assetId)!, startSeconds: clip.sourceStart ?? 0, durationSeconds: clip.duration!, speed: clip.speed ?? 1 })), outputPath, workDir, sequence?.width ?? 1080, sequence?.height ?? 1920);
+    const outputBuffer = await readFileBuffer(outputPath);
+    const storagePath = `${exportRow.tenant_id}/${exportRow.project_id}/exports/${exportId}.mp4`;
+    const uploaded = await supabase.storage.from('clipcon-media').upload(storagePath, outputBuffer, { contentType: 'video/mp4', upsert: true });
+    if (uploaded.error) throw new Error('Could not store exported video');
+    const { data: outputAsset, error: assetError } = await supabase.from('media_assets').insert({ tenant_id: exportRow.tenant_id, project_id: exportRow.project_id, name: `export-${exportId}.mp4`, kind: 'video', mime_type: 'video/mp4', storage_path: storagePath, size_bytes: outputBuffer.length, status: 'ready', created_by: exportRow.created_by }).select('id').single();
+    if (assetError || !outputAsset) throw new Error('Could not register exported video');
+    await supabase.from('editor_exports').update({ status: 'completed', asset_id: outputAsset.id, completed_at: new Date().toISOString() }).eq('id', exportId);
+  } catch (exportError) {
+    const message = exportError instanceof Error ? exportError.message : 'Could not export sequence';
+    await supabase.from('editor_exports').update({ status: 'error', error_message: message }).eq('id', exportId);
+    throw new Error(message);
+  }
 }

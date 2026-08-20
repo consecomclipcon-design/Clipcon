@@ -1,14 +1,16 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { resolve, relative, sep } from 'node:path';
 import { config, listenPort } from './config.js';
 import { admin } from './supabase.js';
 import { createGoogleClient, encryptToken, fetchAccountLabel, getProviderScopes, getStoredToken, googleConfigured, signOAuthState, verifyOAuthState, type GoogleProvider } from './integrations/google.js';
 import { youtubeVideoId } from './youtube-url.js';
 
-const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie'] } });
+const app = Fastify({ bodyLimit: 500 * 1024 * 1024, logger: { redact: ['req.headers.authorization', 'req.headers.cookie'] } });
 await app.register(cors, { origin: config.WEB_ORIGIN });
+app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
 const webRoot = resolve(new URL('../../web/dist', import.meta.url).pathname);
 app.get('/health', async () => ({ status: 'ok', service: 'clipcon-api' }));
 app.get('/config.js', async (_request, reply) => reply.type('text/javascript; charset=utf-8').header('cache-control', 'no-store').send(`window.__CLIPCON_CONFIG__=${JSON.stringify({ supabaseUrl: process.env.VITE_SUPABASE_URL, supabasePublishableKey: process.env.VITE_SUPABASE_PUBLISHABLE_KEY, apiUrl: process.env.VITE_API_URL })};`));
@@ -64,6 +66,95 @@ app.post('/v1/projects', async (request, reply) => {
   const { error: jobError } = await admin.from('processing_jobs').insert({ tenant_id: tenantId, project_id: project.id, source_video_id: video.id, type: 'download_video' });
   if (jobError) { await admin.from('projects').delete().eq('id', project.id); return reply.code(503).send({ error: 'Could not enqueue processing job' }); }
   return reply.code(201).send({ project, video });
+});
+
+const supportedMedia = new Map([
+  ['video/mp4', 'video'], ['video/quicktime', 'video'], ['video/webm', 'video'],
+  ['audio/mpeg', 'audio'], ['audio/wav', 'audio'], ['audio/x-wav', 'audio'], ['audio/mp4', 'audio'], ['audio/m4a', 'audio'],
+  ['image/jpeg', 'image'], ['image/png', 'image'],
+]);
+
+async function getProjectForUser(projectId: string, userId: string) {
+  const { data: project } = await admin.from('projects').select('id, tenant_id').eq('id', projectId).maybeSingle();
+  if (!project || !(await hasTenantMembership(userId, project.tenant_id))) return null;
+  return project;
+}
+
+app.get('/v1/projects/:projectId/assets', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const { data, error } = await admin.from('media_assets').select('id, name, kind, mime_type, storage_path, size_bytes, duration_seconds, width, height, fps, status, error_message, metadata, created_at, updated_at').eq('project_id', projectId).order('created_at', { ascending: false });
+  if (error) return reply.code(503).send({ error: 'Media assets are temporarily unavailable' });
+  return { assets: data ?? [] };
+});
+
+app.post('/v1/projects/:projectId/assets', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const query = request.query as { filename?: string; mime_type?: string };
+  const mimeType = query.mime_type ?? request.headers['content-type']?.split(';')[0] ?? '';
+  const kind = supportedMedia.get(mimeType);
+  const filename = query.filename?.trim();
+  const body = request.body as Buffer;
+  if (!kind || !filename || !Buffer.isBuffer(body) || body.length === 0) return reply.code(400).send({ error: 'A supported non-empty media file is required' });
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180);
+  const assetId = randomUUID();
+  const storagePath = `${project.tenant_id}/${projectId}/${assetId}/${safeName}`;
+  const { error: uploadError } = await admin.storage.from('clipcon-media').upload(storagePath, body, { contentType: mimeType, upsert: false });
+  if (uploadError) return reply.code(503).send({ error: 'Could not store media file' });
+  const { data: asset, error: assetError } = await admin.from('media_assets').insert({ id: assetId, tenant_id: project.tenant_id, project_id: projectId, name: safeName, kind, mime_type: mimeType, storage_path: storagePath, size_bytes: body.length, status: 'uploaded', created_by: request.user!.id }).select('id, name, kind, mime_type, size_bytes, status, created_at, updated_at').single();
+  if (assetError) { await admin.storage.from('clipcon-media').remove([storagePath]); return reply.code(503).send({ error: 'Could not register media asset' }); }
+  const { error: jobError } = await admin.from('processing_jobs').insert({ tenant_id: project.tenant_id, project_id: projectId, type: 'process_asset', artifacts: { assetId } });
+  if (jobError) return reply.code(503).send({ error: 'Media was stored but could not be queued for processing' });
+  return reply.code(201).send({ asset });
+});
+
+app.get('/v1/assets/:assetId/url', async (request, reply) => {
+  const { assetId } = request.params as { assetId: string };
+  const { data: asset } = await admin.from('media_assets').select('tenant_id, storage_path').eq('id', assetId).maybeSingle();
+  if (!asset || !(await hasTenantMembership(request.user!.id, asset.tenant_id))) return reply.code(404).send({ error: 'Asset not found' });
+  const { data, error } = await admin.storage.from('clipcon-media').createSignedUrl(asset.storage_path, 60 * 60);
+  if (error || !data?.signedUrl) return reply.code(503).send({ error: 'Could not create media URL' });
+  return { url: data.signedUrl, expires_in: 3600 };
+});
+
+app.get('/v1/projects/:projectId/sequence', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  let { data: sequence } = await admin.from('editor_sequences').select('*').eq('project_id', projectId).maybeSingle();
+  if (!sequence) {
+    const result = await admin.from('editor_sequences').insert({ tenant_id: project.tenant_id, project_id: projectId }).select('*').single();
+    sequence = result.data;
+  }
+  if (!sequence) return reply.code(503).send({ error: 'Could not load editor sequence' });
+  return { sequence };
+});
+
+app.put('/v1/projects/:projectId/sequence', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const body = request.body as { name?: string; width?: number; height?: number; fps?: number; state?: Record<string, unknown> };
+  if (!body?.state || typeof body.state !== 'object') return reply.code(400).send({ error: 'A sequence state is required' });
+  const { data, error } = await admin.from('editor_sequences').upsert({ tenant_id: project.tenant_id, project_id: projectId, name: body.name ?? 'Main Sequence', width: body.width ?? 1080, height: body.height ?? 1920, fps: body.fps ?? 30, state: body.state, save_status: 'saved', last_saved_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: 'project_id' }).select('*').single();
+  if (error) return reply.code(503).send({ error: 'Could not save editor sequence' });
+  return { sequence: data };
+});
+
+app.post('/v1/projects/:projectId/exports', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const { data: sequence } = await admin.from('editor_sequences').select('id').eq('project_id', projectId).maybeSingle();
+  if (!sequence) return reply.code(400).send({ error: 'Create a sequence before exporting' });
+  const { data: exportJob, error } = await admin.from('editor_exports').insert({ tenant_id: project.tenant_id, project_id: projectId, sequence_id: sequence.id, created_by: request.user!.id }).select('id, status, created_at').single();
+  if (error) return reply.code(503).send({ error: 'Could not create export' });
+  const { error: queueError } = await admin.from('processing_jobs').insert({ tenant_id: project.tenant_id, project_id: projectId, type: 'export_sequence', artifacts: { exportId: exportJob.id } });
+  if (queueError) return reply.code(503).send({ error: 'Could not queue export' });
+  return reply.code(202).send({ export: exportJob });
 });
 
 app.get('/v1/projects/:projectId', async (request, reply) => {
