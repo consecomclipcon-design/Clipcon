@@ -184,10 +184,10 @@ export async function handleSyncYoutubeMetrics(supabase: SupabaseClient, job: Jo
   const capturedAt = new Date().toISOString();
   const { error: verificationError } = await supabase.from('publications').update({ youtube_url: `https://www.youtube.com/shorts/${publication.youtube_video_id}`, channel_id: metrics.channelId, channel_title: metrics.channelTitle, verified_at: capturedAt, updated_at: capturedAt }).eq('id', publicationId);
   if (verificationError) throw new Error('Could not save YouTube verification: ' + verificationError.message);
-  const row = { tenant_id: job.tenant_id, clip_id: clipId, publication_id: publicationId, views: metrics.views, likes: metrics.likes, comments: metrics.comments, subscribers_gained: null, average_percentage_viewed: null, published_at: metrics.publishedAt ?? publication.published_at, last_synced_at: capturedAt };
+  const row = { tenant_id: job.tenant_id, clip_id: clipId, publication_id: publicationId, views: metrics.views, likes: metrics.likes, comments: metrics.comments, subscribers_gained: metrics.subscribersGained ?? null, average_view_duration_seconds: metrics.averageViewDurationSeconds ?? null, average_percentage_viewed: metrics.averagePercentageViewed ?? null, published_at: metrics.publishedAt ?? publication.published_at, last_synced_at: capturedAt };
   const { error: upsertError } = await supabase.from('clip_performance').upsert(row, { onConflict: 'clip_id' });
   if (upsertError) throw new Error('Could not save YouTube metrics: ' + upsertError.message);
-  const { error: historyError } = await supabase.from('clip_performance_history').insert({ tenant_id: job.tenant_id, clip_id: clipId, publication_id: publicationId, views: metrics.views, likes: metrics.likes, comments: metrics.comments, subscribers_gained: null, average_percentage_viewed: null, captured_at: capturedAt });
+  const { error: historyError } = await supabase.from('clip_performance_history').insert({ tenant_id: job.tenant_id, clip_id: clipId, publication_id: publicationId, views: metrics.views, likes: metrics.likes, comments: metrics.comments, subscribers_gained: metrics.subscribersGained ?? null, average_view_duration_seconds: metrics.averageViewDurationSeconds ?? null, average_percentage_viewed: metrics.averagePercentageViewed ?? null, captured_at: capturedAt });
   if (historyError) throw new Error('Could not save metrics history: ' + historyError.message);
   await enqueueNext(supabase, job, 'calculate_clip_score', job.source_video_id, { clipId });
 }

@@ -87,5 +87,17 @@ export async function fetchYoutubeVideoMetrics(supabase: SupabaseClient, tenantI
   const data = (await response.json()) as { items?: Array<{ snippet?: { publishedAt?: string; channelId?: string; channelTitle?: string }; statistics?: { viewCount?: string; likeCount?: string; commentCount?: string }; status?: { privacyStatus?: string } }> };
   const item = data.items?.[0];
   if (!item) throw new Error('YouTube video was not found for metrics sync');
-  return { views: Number(item.statistics?.viewCount ?? 0), likes: Number(item.statistics?.likeCount ?? 0), comments: Number(item.statistics?.commentCount ?? 0), publishedAt: item.snippet?.publishedAt ?? null, channelId: item.snippet?.channelId ?? null, channelTitle: item.snippet?.channelTitle ?? null, privacyStatus: item.status?.privacyStatus ?? null };
+  let analytics: { subscribersGained?: number; averagePercentageViewed?: number; averageViewDurationSeconds?: number } | null = null;
+  if (item.snippet?.publishedAt) {
+    const startDate = item.snippet.publishedAt.slice(0, 10);
+    const endDate = new Date().toISOString().slice(0, 10);
+    const analyticsResponse = await fetch(`https://youtubeanalytics.googleapis.com/v2/reports?ids=channel%3D%3DMINE&startDate=${startDate}&endDate=${endDate}&metrics=views%2Clikes%2Ccomments%2CsubscribersGained%2CaverageViewPercentage%2CaverageViewDuration&filters=video%3D%3D${encodeURIComponent(videoId)}`, { headers: { Authorization: 'Bearer ' + token } });
+    if (analyticsResponse.ok) {
+      const report = (await analyticsResponse.json()) as { columnHeaders?: Array<{ name?: string }>; rows?: Array<Array<number>> };
+      const headers = (report.columnHeaders ?? []).map(header => header.name ?? '');
+      const values = report.rows?.[0] ?? [];
+      analytics = { subscribersGained: values[headers.indexOf('subscribersGained')], averagePercentageViewed: values[headers.indexOf('averageViewPercentage')], averageViewDurationSeconds: values[headers.indexOf('averageViewDuration')] };
+    }
+  }
+  return { views: Number(item.statistics?.viewCount ?? 0), likes: Number(item.statistics?.likeCount ?? 0), comments: Number(item.statistics?.commentCount ?? 0), subscribersGained: analytics?.subscribersGained, averagePercentageViewed: analytics?.averagePercentageViewed, averageViewDurationSeconds: analytics?.averageViewDurationSeconds, publishedAt: item.snippet?.publishedAt ?? null, channelId: item.snippet?.channelId ?? null, channelTitle: item.snippet?.channelTitle ?? null, privacyStatus: item.status?.privacyStatus ?? null };
 }
