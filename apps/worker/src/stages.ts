@@ -200,4 +200,27 @@ export async function handleCalculateClipScore(supabase: SupabaseClient, job: Jo
   const result = calculatePerformanceScore({ views: Number(performance.views), likes: Number(performance.likes), comments: Number(performance.comments), subscribersGained: performance.subscribers_gained, averagePercentageViewed: performance.average_percentage_viewed, publishedAt: performance.published_at });
   const { error: updateError } = await supabase.from('clip_performance').update({ performance_score: result.score, score_inputs: result.inputs, updated_at: new Date().toISOString() }).eq('clip_id', clipId);
   if (updateError) throw new Error('Could not save performance score: ' + updateError.message);
+  const { data: activeLearningJob } = await supabase.from('processing_jobs').select('id').eq('tenant_id', job.tenant_id).eq('type', 'analyze_performance').in('status', ['queued', 'processing']).maybeSingle();
+  if (!activeLearningJob) await enqueueNext(supabase, job, 'analyze_performance', job.source_video_id);
+}
+
+export async function handleAnalyzePerformance(supabase: SupabaseClient, job: Job) {
+  const { data: rows, error } = await supabase.from('clip_performance').select('views, likes, comments, subscribers_gained, average_percentage_viewed, performance_score').eq('tenant_id', job.tenant_id);
+  if (error) throw new Error('Could not load performance sample: ' + error.message);
+  const sampleSize = rows?.length ?? 0;
+  const averageViews = sampleSize ? rows!.reduce((sum, row) => sum + Number(row.views ?? 0), 0) / sampleSize : null;
+  const scores = (rows ?? []).map(row => Number(row.performance_score)).filter(Number.isFinite);
+  const averageScore = scores.length ? scores.reduce((sum, score) => sum + score, 0) / scores.length : null;
+  const confidence = Math.min(1, sampleSize / 30);
+  const status = sampleSize >= 30 ? 'validated' : sampleSize >= 5 ? 'emerging' : 'insufficient_data';
+  const description = sampleSize < 5
+    ? 'Dados insuficientes para identificar um padrão confiável.'
+    : `Baseline observado em ${sampleSize} clipe${sampleSize === 1 ? '' : 's'}; ainda não é uma conclusão causal.`;
+  const outcomeSummary = { averageViews, averageScore, measuredMetrics: ['views', 'likes', 'comments', 'performance_score'], sampleSize };
+  const { data: existing } = await supabase.from('learning_patterns').select('id').eq('tenant_id', job.tenant_id).eq('name', 'Baseline de performance').maybeSingle();
+  const values = { tenant_id: job.tenant_id, name: 'Baseline de performance', description, feature_filter: {}, outcome_summary: outcomeSummary, sample_size: sampleSize, confidence, status, last_calculated_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  const result = existing?.id
+    ? await supabase.from('learning_patterns').update(values).eq('id', existing.id)
+    : await supabase.from('learning_patterns').insert(values);
+  if (result.error) throw new Error('Could not save learning baseline: ' + result.error.message);
 }
