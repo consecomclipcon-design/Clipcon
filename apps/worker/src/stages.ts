@@ -1257,10 +1257,16 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
       "TEXT_GENERATION",
     );
     const analyzeStarted = Date.now();
-    const candidates = await analyzeTranscript(text, {
+    let candidates = await analyzeTranscript(text, {
       key: analysisCredential.secret,
       model: analysisCredential.model,
     });
+    if (!candidates.length) {
+      candidates = await analyzeTranscript(text, {
+        key: analysisCredential.secret,
+        model: analysisCredential.model,
+      });
+    }
     await recordAiUsage(
       supabase,
       analysisCredential,
