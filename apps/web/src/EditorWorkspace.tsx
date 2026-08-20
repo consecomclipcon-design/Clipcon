@@ -302,6 +302,22 @@ export function EditorWorkspace({
       await loadAssets();
     }
   }
+  async function importUrl() {
+    const url = window.prompt("URL HTTPS da mídia");
+    if (!url?.trim()) return;
+    setMessage("Baixando mídia por URL...");
+    const response = await authFetch(
+      `/v1/projects/${projectId}/assets/import-url`,
+      { method: "POST", body: JSON.stringify({ url: url.trim() }) },
+    );
+    setMessage(
+      response.ok
+        ? "Mídia importada. Processando..."
+        : ((await response.json().catch(() => null))?.error ??
+            "Não foi possível importar a URL."),
+    );
+    await loadAssets();
+  }
   async function openAsset(asset: Asset) {
     setSelectedIds([asset.id]);
     const response = await authFetch(`/v1/assets/${asset.id}/url`);
@@ -729,6 +745,7 @@ export function EditorWorkspace({
           </div>
           <div className="media-toolbar">
             <button onClick={() => fileInput.current?.click()}>Importar</button>
+            <button onClick={importUrl}>URL</button>
             <button onClick={runClipStudio}>✦ Studio</button>
             <button onClick={aiEdit}>✦ IA</button>
             <input
