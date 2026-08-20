@@ -4,7 +4,7 @@ import { config, assertSupabaseConfig } from './config.js';
 import {
   handleDownloadVideo, handleExtractAudio, handleTranscribe, handleAnalyze,
   handleSelectClips, handleRenderClip, handleUploadDrive, handlePublishYoutube, type Job,
-  handleSyncYoutubeMetrics, handleCalculateClipScore, handleAnalyzePerformance, handleProcessAsset, handleExportSequence,
+  handleSyncYoutubeMetrics, handleCalculateClipScore, handleAnalyzePerformance, handleProcessAsset, handleExportSequence, handleAiEdit,
 } from './stages.js';
 
 assertSupabaseConfig();
@@ -29,6 +29,7 @@ const handlers: Record<string, (supabase: SupabaseClient, job: Job) => Promise<v
   analyze_performance: handleAnalyzePerformance,
   process_asset: handleProcessAsset,
   export_sequence: handleExportSequence,
+  ai_edit: handleAiEdit,
 };
 
 async function execute(job: Job) {

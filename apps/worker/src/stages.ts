@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -190,6 +191,47 @@ export async function handleSyncYoutubeMetrics(supabase: SupabaseClient, job: Jo
   const { error: historyError } = await supabase.from('clip_performance_history').insert({ tenant_id: job.tenant_id, clip_id: clipId, publication_id: publicationId, views: metrics.views, likes: metrics.likes, comments: metrics.comments, subscribers_gained: metrics.subscribersGained ?? null, average_view_duration_seconds: metrics.averageViewDurationSeconds ?? null, average_percentage_viewed: metrics.averagePercentageViewed ?? null, captured_at: capturedAt });
   if (historyError) throw new Error('Could not save metrics history: ' + historyError.message);
   await enqueueNext(supabase, job, 'calculate_clip_score', job.source_video_id, { clipId });
+}
+
+export async function handleAiEdit(supabase: SupabaseClient, job: Job) {
+  const runId = job.artifacts.runId as string;
+  const assetId = job.artifacts.assetId as string;
+  const sequenceId = job.artifacts.sequenceId as string;
+  if (!runId || !assetId || !sequenceId) throw new Error('ai_edit job is missing run, asset or sequence');
+  const { data: run } = await supabase.from('editor_ai_runs').select('id, tenant_id, project_id').eq('id', runId).single();
+  const { data: asset } = await supabase.from('media_assets').select('storage_path').eq('id', assetId).single();
+  if (!run || !asset) throw new Error('AI edit input not found');
+  await supabase.from('editor_ai_runs').update({ status: 'processing' }).eq('id', runId);
+  try {
+    const downloaded = await supabase.storage.from('clipcon-media').download(asset.storage_path);
+    if (downloaded.error || !downloaded.data) throw new Error('Could not download AI edit asset');
+    const workDir = await mkdtemp(join(tmpdir(), 'clipcon-ai-'));
+    const sourcePath = join(workDir, 'source.mp4');
+    await writeFile(sourcePath, Buffer.from(await downloaded.data.arrayBuffer()));
+    const audioPath = await extractAudio(sourcePath, workDir);
+    const transcript = await transcribeAudio(audioPath);
+    const transcriptText = transcript.segments.map(segment => `[${segment.start}-${segment.end}] ${segment.text}`).join('\n');
+    const candidates = (await analyzeTranscript(transcriptText)).filter(candidate => candidate.end > candidate.start && candidate.end - candidate.start >= 30).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    const selected: Array<{ start: number; end: number; score?: number; title?: string; hook?: string }> = [];
+    for (const candidate of candidates) {
+      if (selected.some(other => Math.min(candidate.end, other.end) - Math.max(candidate.start, other.start) > 10)) continue;
+      selected.push(candidate);
+      if (selected.length >= 5) break;
+    }
+    const { data: sequence } = await supabase.from('editor_sequences').select('state').eq('id', sequenceId).single();
+    const currentState = sequence?.state as { tracks?: Array<{ id: string; type: string; name: string; locked: boolean; muted: boolean; clips: unknown[] }>; playhead?: number; inPoint?: number | null; outPoint?: number | null } | null;
+    const tracks = currentState?.tracks?.length ? currentState.tracks : [{ id: 'v1', type: 'video', name: 'V1', locked: false, muted: false, clips: [] }];
+    let cursor = 0;
+    const clips = selected.map(candidate => { const duration = Math.min(120, candidate.end - candidate.start); const clip = { id: randomUUID(), assetId, start: cursor, sourceStart: candidate.start, duration, speed: 1, aiScore: candidate.score ?? null, aiTitle: candidate.title ?? null, aiHook: candidate.hook ?? null }; cursor += duration; return clip; });
+    const nextState = { tracks: tracks.map(track => track.type === 'video' ? { ...track, clips } : track), playhead: 0, inPoint: null, outPoint: null };
+    const { error: sequenceError } = await supabase.from('editor_sequences').update({ state: nextState, save_status: 'saved', last_saved_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', sequenceId);
+    if (sequenceError) throw new Error('Could not save AI sequence: ' + sequenceError.message);
+    await supabase.from('editor_ai_runs').update({ status: 'completed', candidates_count: selected.length, completed_at: new Date().toISOString() }).eq('id', runId);
+  } catch (aiError) {
+    const message = aiError instanceof Error ? aiError.message : 'AI edit failed';
+    await supabase.from('editor_ai_runs').update({ status: 'error', error_message: message }).eq('id', runId);
+    throw new Error(message);
+  }
 }
 
 export async function handleCalculateClipScore(supabase: SupabaseClient, job: Job) {

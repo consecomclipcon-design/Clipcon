@@ -213,6 +213,30 @@ app.get('/v1/projects/:projectId/exports', async (request, reply) => {
   return { exports: data ?? [] };
 });
 
+app.post('/v1/projects/:projectId/ai-edit', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const body = request.body as { asset_id?: string };
+  const { data: sequence } = await admin.from('editor_sequences').select('id').eq('project_id', projectId).maybeSingle();
+  const { data: asset } = body.asset_id ? await admin.from('media_assets').select('id, status, kind').eq('id', body.asset_id).eq('project_id', projectId).maybeSingle() : { data: null };
+  if (!sequence || !asset || asset.status !== 'ready' || asset.kind !== 'video') return reply.code(400).send({ error: 'A ready video asset and sequence are required' });
+  const { data: run, error } = await admin.from('editor_ai_runs').insert({ tenant_id: project.tenant_id, project_id: projectId, sequence_id: sequence.id, asset_id: asset.id, created_by: request.user!.id }).select('id, status, created_at').single();
+  if (error) return reply.code(503).send({ error: 'Could not create AI edit run' });
+  const { error: queueError } = await admin.from('processing_jobs').insert({ tenant_id: project.tenant_id, project_id: projectId, type: 'ai_edit', artifacts: { runId: run.id, assetId: asset.id, sequenceId: sequence.id } });
+  if (queueError) return reply.code(503).send({ error: 'Could not queue AI edit' });
+  return reply.code(202).send({ run });
+});
+
+app.get('/v1/projects/:projectId/ai-edit', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: 'Project not found' });
+  const { data, error } = await admin.from('editor_ai_runs').select('id, asset_id, status, candidates_count, error_message, created_at, completed_at').eq('project_id', projectId).order('created_at', { ascending: false }).limit(10);
+  if (error) return reply.code(503).send({ error: 'AI edit runs are temporarily unavailable' });
+  return { runs: data ?? [] };
+});
+
 app.get('/v1/projects/:projectId', async (request, reply) => {
   const { projectId } = request.params as { projectId: string };
   const { data: project, error } = await admin.from('projects').select('id, tenant_id, name, description, strategy, strategy_config, status, created_at, updated_at').eq('id', projectId).single();
