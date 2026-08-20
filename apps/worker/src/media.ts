@@ -85,7 +85,7 @@ export async function renderSequence(segments: SequenceSegment[], outPath: strin
       const end = Math.min(segment.durationSeconds, overlay.endSeconds - timelineStart);
       if (end <= 0 || start >= segment.durationSeconds) continue;
       const text = overlay.text.replace(/[\\':,]/g, match => `\\${match}`).replace(/\n/g, ' ');
-      filters.push(`drawtext=text='${text}':fontcolor=${overlay.color ?? 'white'}:fontsize=${overlay.fontSize ?? 48}:x=(w-text_w)/2:y=h-text_h-80:box=1:boxcolor=black@0.55:enable='between(t\\,${start}\\,${end})'`);
+      filters.push(`drawtext=fontfile=/usr/share/fonts/dejavu/DejaVuSans.ttf:text='${text}':fontcolor=${overlay.color ?? 'white'}:fontsize=${overlay.fontSize ?? 48}:x=(w-text_w)/2:y=h-text_h-80:box=1:boxcolor=black@0.55:enable='between(t\\,${start}\\,${end})'`);
     }
     const args = ['-y', '-i', segment.inputPath, '-ss', String(Math.max(0, segment.startSeconds)), '-t', String(Math.max(0.05, segment.durationSeconds * speed)), '-vf', filters.join(','), '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '2', '-crf', '23', '-c:a', 'aac', '-b:a', '128k'];
     if (speed !== 1) args.push('-af', `atempo=${speed}`);
