@@ -1,6 +1,7 @@
 import { config } from './config.js';
 import { admin } from './supabase.js';
 import { encryptToken } from './integrations/google.js';
+import { maskSecret, modelCapabilities } from './provider-utils.js';
 
 export type ProviderSlug = 'groq' | 'openai' | 'nvidia';
 type DiscoveredModel = { id: string; capabilities: string[]; inputTypes: string[]; outputTypes: string[]; metadata: Record<string, unknown> };
@@ -11,29 +12,11 @@ const endpoints: Record<ProviderSlug, string> = {
   nvidia: 'https://integrate.api.nvidia.com/v1',
 };
 
-function capabilities(provider: ProviderSlug, model: string) {
-  const lower = model.toLowerCase();
-  const result = new Set<string>();
-  if (provider === 'groq' && lower.includes('whisper')) result.add('TRANSCRIPTION');
-  if (provider === 'openai' && (lower.includes('whisper') || lower.includes('transcri'))) result.add('TRANSCRIPTION');
-  if (!lower.includes('whisper') && !lower.includes('embedding')) result.add('TEXT_GENERATION');
-  if (lower.includes('vision') || lower.includes('omni') || lower.includes('multimodal') || lower.includes('image')) result.add('VISION');
-  if (lower.includes('video') || lower.includes('cosmos')) result.add('VIDEO_UNDERSTANDING');
-  if (lower.includes('embed')) result.add('EMBEDDING');
-  if (lower.includes('translate')) result.add('TRANSLATION');
-  return [...result];
-}
-
 export async function discoverModels(provider: ProviderSlug, secret: string): Promise<DiscoveredModel[]> {
   const response = await fetch(`${endpoints[provider]}/models`, { headers: { Authorization: `Bearer ${secret}` } });
   if (!response.ok) throw new Error(`Provider validation failed (${response.status})`);
   const payload = await response.json() as { data?: Array<{ id?: string; owned_by?: string; created?: number }> };
-  return (payload.data ?? []).filter(model => model.id).map(model => ({ id: model.id!, capabilities: capabilities(provider, model.id!), inputTypes: ['text'], outputTypes: ['text'], metadata: { ownedBy: model.owned_by ?? null, created: model.created ?? null, discoveredFrom: '/models' } }));
-}
-
-export function maskSecret(secret: string) {
-  if (secret.length <= 8) return '****************';
-  return `${secret.slice(0, 4)}${'*'.repeat(Math.min(24, Math.max(8, secret.length - 8)))}${secret.slice(-4)}`;
+  return (payload.data ?? []).filter(model => model.id).map(model => ({ id: model.id!, capabilities: modelCapabilities(provider, model.id!), inputTypes: ['text'], outputTypes: ['text'], metadata: { ownedBy: model.owned_by ?? null, created: model.created ?? null, discoveredFrom: '/models' } }));
 }
 
 export async function saveProviderKey(args: { tenantId: string; workspaceId: string; userId: string; provider: ProviderSlug; secret: string; defaultModel?: string; capabilities?: string[] }) {
