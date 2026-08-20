@@ -69,7 +69,7 @@ async function setProgress(
 export async function handleDownloadVideo(supabase: SupabaseClient, job: Job) {
   const { data: video, error } = await supabase
     .from("source_videos")
-    .select("id, source_url")
+    .select("id, source_url, project_id")
     .eq("id", job.source_video_id)
     .single();
   if (error || !video) throw new Error("Source video not found");
@@ -85,6 +85,63 @@ export async function handleDownloadVideo(supabase: SupabaseClient, job: Job) {
     })
     .eq("id", video.id);
   if (upErr) throw new Error("Could not save download path: " + upErr.message);
+  const sourceBuffer = await readFileBuffer(path);
+  const sourceStoragePath = `${job.tenant_id}/${video.project_id}/source-videos/${video.id}.mp4`;
+  const stored = await supabase.storage
+    .from("clipcon-media")
+    .upload(sourceStoragePath, sourceBuffer, {
+      contentType: "video/mp4",
+      upsert: true,
+    });
+  if (stored.error)
+    throw new Error(
+      "Could not store downloaded source video: " + stored.error.message,
+    );
+  const { data: project } = await supabase
+    .from("projects")
+    .select("workspace_id, created_by")
+    .eq("id", video.project_id)
+    .single();
+  if (!project) throw new Error("Project for source video not found");
+  const { data: existingAsset } = await supabase
+    .from("media_assets")
+    .select("id")
+    .eq("source_video_id", video.id)
+    .maybeSingle();
+  const asset = existingAsset?.id
+    ? existingAsset
+    : (
+        await supabase
+          .from("media_assets")
+          .insert({
+            tenant_id: job.tenant_id,
+            project_id: video.project_id,
+            source_video_id: video.id,
+            name: "source-video.mp4",
+            kind: "video",
+            mime_type: "video/mp4",
+            storage_path: sourceStoragePath,
+            size_bytes: sourceBuffer.length,
+            status: "uploaded",
+            created_by: project.created_by,
+          })
+          .select("id")
+          .single()
+      ).data;
+  if (!asset?.id) throw new Error("Could not register downloaded source asset");
+  const { error: assetJobError } = await supabase
+    .from("processing_jobs")
+    .insert({
+      tenant_id: job.tenant_id,
+      project_id: video.project_id,
+      source_video_id: video.id,
+      type: "process_asset",
+      artifacts: { assetId: asset.id },
+    });
+  if (assetJobError && assetJobError.code !== "23505")
+    throw new Error(
+      "Could not queue downloaded source asset: " + assetJobError.message,
+    );
   await supabase
     .from("processing_jobs")
     .update({
