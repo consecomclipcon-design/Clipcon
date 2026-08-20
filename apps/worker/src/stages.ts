@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { config } from './config.js';
 import { downloadVideo, extractAudio, renderClip, readFileBuffer } from './media.js';
 import { transcribeAudio, analyzeTranscript } from './groq.js';
-import { uploadFileToDrive, uploadVideoToYouTube } from './google.js';
+import { fetchYoutubeVideoMetrics, uploadFileToDrive, uploadVideoToYouTube } from './google.js';
+import { calculatePerformanceScore } from './performance.js';
 
 export type Job = {
   id: string;
@@ -61,6 +62,8 @@ export async function handleTranscribe(supabase: SupabaseClient, job: Job) {
   if (trErr) throw new Error('Could not save transcription: ' + trErr.message);
   const segRows = result.segments.filter(s => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start).map((s, i) => ({ tenant_id: job.tenant_id, transcription_id: tr.id, segment_index: i, start_seconds: s.start, end_seconds: s.end, text_content: s.text }));
   if (!segRows.length) throw new Error('Transcription produced no usable segments');
+  const { error: clearSegmentsError } = await supabase.from('transcription_segments').delete().eq('transcription_id', tr.id);
+  if (clearSegmentsError) throw new Error('Could not replace transcription segments: ' + clearSegmentsError.message);
   const { error: segErr } = await supabase.from('transcription_segments').insert(segRows);
   if (segErr) throw new Error('Could not save transcription segments: ' + segErr.message);
   await setProgress(supabase, job, 45);
@@ -82,7 +85,7 @@ export async function handleAnalyze(supabase: SupabaseClient, job: Job) {
     const score = Math.min(100, Math.max(0, Math.round(c.score ?? 50)));
     const musicRisk = c.musicRisk !== undefined && Number.isFinite(c.musicRisk) ? Math.min(100, Math.max(0, Math.round(c.musicRisk))) : null;
     const contextRisk = c.contextRisk !== undefined && Number.isFinite(c.contextRisk) ? Math.min(100, Math.max(0, Math.round(c.contextRisk))) : null;
-    return { tenant_id: job.tenant_id, project_id: job.project_id, source_video_id: job.source_video_id, start_seconds: start, end_seconds: end, score, title: c.title ?? 'Clip', reason: c.reason ?? null, hook: c.hook ?? null, category: c.category ?? null, music_risk: musicRisk, context_risk: contextRisk, status: 'candidate' };
+    return { tenant_id: job.tenant_id, project_id: job.project_id, source_video_id: job.source_video_id, start_seconds: start, end_seconds: end, score, title: c.title ?? 'Clip', reason: c.reason ?? null, hook: c.hook ?? null, category: c.category ?? null, music_risk: musicRisk, context_risk: contextRisk, feature_snapshot: { score, title: c.title ?? null, reason: c.reason ?? null, hook: c.hook ?? null, category: c.category ?? null, music_risk: musicRisk, context_risk: contextRisk }, status: 'candidate' };
   }).filter((row): row is NonNullable<typeof row> => row !== null);
   if (!rows.length) throw new Error('Analysis produced no usable candidates');
   const { error: insErr } = await supabase.from('clip_candidates').insert(rows);
@@ -92,7 +95,7 @@ export async function handleAnalyze(supabase: SupabaseClient, job: Job) {
 }
 
 export async function handleSelectClips(supabase: SupabaseClient, job: Job) {
-  const { data: candidates } = await supabase.from('clip_candidates').select('id, start_seconds, end_seconds, score, title, reason, hook, category, music_risk, context_risk').eq('source_video_id', job.source_video_id).order('score', { ascending: false });
+  const { data: candidates } = await supabase.from('clip_candidates').select('id, start_seconds, end_seconds, score, title, reason, hook, category, music_risk, context_risk, feature_snapshot').eq('source_video_id', job.source_video_id).order('score', { ascending: false });
   if (!candidates?.length) throw new Error('No clip candidates available; re-run analyze stage');
   const usable = candidates.filter(c => {
     const duration = c.end_seconds - c.start_seconds;
@@ -116,6 +119,8 @@ export async function handleSelectClips(supabase: SupabaseClient, job: Job) {
   const clipRows = selected.map(c => ({ tenant_id: job.tenant_id, project_id: job.project_id, candidate_id: c.id, title: c.title ?? 'Clip', description: c.reason ?? '', hashtags: [], status: 'draft' }));
   const { data: clips, error: insErr } = await supabase.from('clips').insert(clipRows).select('id');
   if (insErr) throw new Error('Could not save clips: ' + insErr.message);
+  const { error: featureError } = await supabase.from('clip_features').upsert((clips ?? []).map((clip, index) => ({ tenant_id: job.tenant_id, clip_id: clip.id, features: selected[index].feature_snapshot ?? {}, source: 'analysis', model: config.GROQ_ANALYSIS_MODEL, analyzed_at: new Date().toISOString() })), { onConflict: 'clip_id' });
+  if (featureError) throw new Error('Could not save clip features: ' + featureError.message);
   await setProgress(supabase, job, 75);
   for (const clip of clips ?? []) await enqueueNext(supabase, job, 'render_clip', job.source_video_id, { clipId: clip.id });
 }
@@ -162,8 +167,35 @@ export async function handlePublishYoutube(supabase: SupabaseClient, job: Job) {
   const uploaded = await uploadVideoToYouTube(supabase, job.tenant_id, clip.title ?? 'ClipCon Short', clip.description ?? 'Generated by ClipCon', data);
   const { error: upErr } = await supabase.from('clips').update({ status: 'published', updated_at: new Date().toISOString() }).eq('id', clipId);
   if (upErr) throw new Error('Could not mark clip published: ' + upErr.message);
-  const { error: pubErr } = await supabase.from('publications').insert({ tenant_id: job.tenant_id, clip_id: clipId, status: 'published', youtube_video_id: uploaded.id, published_at: new Date().toISOString() });
+  const { data: publication, error: pubErr } = await supabase.from('publications').insert({ tenant_id: job.tenant_id, clip_id: clipId, status: 'published', youtube_video_id: uploaded.id, youtube_url: `https://www.youtube.com/shorts/${uploaded.id}`, published_at: new Date().toISOString() }).select('id').single();
   if (pubErr) throw new Error('Could not save publication: ' + pubErr.message);
+  await enqueueNext(supabase, job, 'sync_youtube_metrics', job.source_video_id, { clipId, publicationId: publication.id });
   const { error: vidErr } = await supabase.from('source_videos').update({ status: 'completed', updated_at: new Date().toISOString() }).eq('id', job.source_video_id);
   if (vidErr) throw new Error('Could not mark source video completed: ' + vidErr.message);
+}
+
+export async function handleSyncYoutubeMetrics(supabase: SupabaseClient, job: Job) {
+  const clipId = job.artifacts.clipId as string;
+  const publicationId = job.artifacts.publicationId as string;
+  if (!clipId || !publicationId) throw new Error('sync_youtube_metrics job is missing clip or publication');
+  const { data: publication, error: pubErr } = await supabase.from('publications').select('youtube_video_id, published_at').eq('id', publicationId).eq('clip_id', clipId).single();
+  if (pubErr || !publication?.youtube_video_id) throw new Error('Published YouTube video not found');
+  const metrics = await fetchYoutubeVideoMetrics(supabase, job.tenant_id, publication.youtube_video_id);
+  const capturedAt = new Date().toISOString();
+  const row = { tenant_id: job.tenant_id, clip_id: clipId, publication_id: publicationId, views: metrics.views, likes: metrics.likes, comments: metrics.comments, subscribers_gained: null, average_percentage_viewed: null, published_at: metrics.publishedAt ?? publication.published_at, last_synced_at: capturedAt };
+  const { error: upsertError } = await supabase.from('clip_performance').upsert(row, { onConflict: 'clip_id' });
+  if (upsertError) throw new Error('Could not save YouTube metrics: ' + upsertError.message);
+  const { error: historyError } = await supabase.from('clip_performance_history').insert({ tenant_id: job.tenant_id, clip_id: clipId, publication_id: publicationId, views: metrics.views, likes: metrics.likes, comments: metrics.comments, subscribers_gained: null, average_percentage_viewed: null, captured_at: capturedAt });
+  if (historyError) throw new Error('Could not save metrics history: ' + historyError.message);
+  await enqueueNext(supabase, job, 'calculate_clip_score', job.source_video_id, { clipId });
+}
+
+export async function handleCalculateClipScore(supabase: SupabaseClient, job: Job) {
+  const clipId = job.artifacts.clipId as string;
+  if (!clipId) throw new Error('calculate_clip_score job is missing clipId');
+  const { data: performance, error } = await supabase.from('clip_performance').select('views, likes, comments, subscribers_gained, average_percentage_viewed, published_at').eq('clip_id', clipId).single();
+  if (error || !performance) throw new Error('Performance data not found');
+  const result = calculatePerformanceScore({ views: Number(performance.views), likes: Number(performance.likes), comments: Number(performance.comments), subscribersGained: performance.subscribers_gained, averagePercentageViewed: performance.average_percentage_viewed, publishedAt: performance.published_at });
+  const { error: updateError } = await supabase.from('clip_performance').update({ performance_score: result.score, score_inputs: result.inputs, updated_at: new Date().toISOString() }).eq('clip_id', clipId);
+  if (updateError) throw new Error('Could not save performance score: ' + updateError.message);
 }

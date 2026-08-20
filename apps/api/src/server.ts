@@ -1,10 +1,10 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import { readFile } from 'node:fs/promises';
 import { resolve, relative, sep } from 'node:path';
 import { config, listenPort } from './config.js';
 import { admin } from './supabase.js';
-import { createGoogleClient, encryptToken, fetchAccountLabel, getProviderScopes, googleConfigured, signOAuthState, verifyOAuthState, type GoogleProvider } from './integrations/google.js';
+import { createGoogleClient, encryptToken, fetchAccountLabel, getProviderScopes, getStoredToken, googleConfigured, signOAuthState, verifyOAuthState, type GoogleProvider } from './integrations/google.js';
 import { youtubeVideoId } from './youtube-url.js';
 
 const app = Fastify({ logger: { redact: ['req.headers.authorization', 'req.headers.cookie'] } });
@@ -26,6 +26,19 @@ app.get('/v1/me', async request => {
   const { data: memberships } = await admin.from('tenant_members').select('tenant_id, role, tenants(id, name, slug, status)').eq('user_id', request.user!.id);
   return { profile: data, memberships: memberships ?? [] };
 });
+
+async function hasTenantMembership(userId: string, tenantId: string) {
+  const { data } = await admin.from('tenant_members').select('tenant_id').eq('tenant_id', tenantId).eq('user_id', userId).maybeSingle();
+  return Boolean(data);
+}
+
+async function requireTenant(request: FastifyRequest, reply: FastifyReply, tenantId?: string) {
+  if (!tenantId || !(await hasTenantMembership(request.user!.id, tenantId))) {
+    reply.code(403).send({ error: 'Tenant access required' });
+    return false;
+  }
+  return true;
+}
 app.post('/v1/tenants', async (request, reply) => {
   const body = request.body as { name?: string; slug?: string };
   const name = body?.name?.trim();
@@ -38,19 +51,122 @@ app.post('/v1/tenants', async (request, reply) => {
   return reply.code(201).send({ tenant });
 });
 app.post('/v1/projects', async (request, reply) => {
-  const body = request.body as { tenant_id?: string; name?: string; source_url?: string };
+  const body = request.body as { tenant_id?: string; name?: string; description?: string; strategy?: string; strategy_config?: Record<string, unknown>; source_url?: string };
   const tenantId = body?.tenant_id; const sourceUrl = body?.source_url?.trim(); const name = body?.name?.trim();
   const videoId = sourceUrl ? youtubeVideoId(sourceUrl) : null;
   if (!tenantId || !sourceUrl || !name || !videoId) return reply.code(400).send({ error: 'Project name, tenant and valid YouTube URL are required' });
   const { data: membership } = await admin.from('tenant_members').select('tenant_id').eq('tenant_id', tenantId).eq('user_id', request.user!.id).maybeSingle();
   if (!membership) return reply.code(403).send({ error: 'Tenant access required' });
-  const { data: project, error: projectError } = await admin.from('projects').insert({ tenant_id: tenantId, name, created_by: request.user!.id }).select('id, tenant_id, name, status, created_at').single();
+  const { data: project, error: projectError } = await admin.from('projects').insert({ tenant_id: tenantId, name, description: body.description?.trim() || null, strategy: body.strategy ?? 'viral', strategy_config: body.strategy_config ?? {}, created_by: request.user!.id }).select('id, tenant_id, name, description, strategy, strategy_config, status, created_at').single();
   if (projectError) return reply.code(400).send({ error: 'Could not create project' });
   const { data: video, error: videoError } = await admin.from('source_videos').insert({ tenant_id: tenantId, project_id: project.id, youtube_video_id: videoId, source_url: sourceUrl }).select('id, status').single();
   if (videoError) { await admin.from('projects').delete().eq('id', project.id); return reply.code(videoError.code === '23505' ? 409 : 400).send({ error: videoError.code === '23505' ? 'This video is already registered in this workspace' : 'Could not register source video' }); }
   const { error: jobError } = await admin.from('processing_jobs').insert({ tenant_id: tenantId, project_id: project.id, source_video_id: video.id, type: 'download_video' });
   if (jobError) { await admin.from('projects').delete().eq('id', project.id); return reply.code(503).send({ error: 'Could not enqueue processing job' }); }
   return reply.code(201).send({ project, video });
+});
+
+app.get('/v1/projects/:projectId', async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const { data: project, error } = await admin.from('projects').select('id, tenant_id, name, description, strategy, strategy_config, status, created_at, updated_at').eq('id', projectId).single();
+  if (error || !project || !(await hasTenantMembership(request.user!.id, project.tenant_id))) return reply.code(404).send({ error: 'Project not found' });
+  const [{ data: clips }, { data: source }] = await Promise.all([
+    admin.from('clips').select('id, title, status, duration_seconds, drive_file_id, created_at, updated_at').eq('project_id', projectId).order('created_at', { ascending: false }),
+    admin.from('source_videos').select('id, source_url, youtube_video_id, title, duration_seconds, status, created_at').eq('project_id', projectId).maybeSingle(),
+  ]);
+  return { project, source, clips: clips ?? [] };
+});
+
+app.get('/v1/clips', async (request, reply) => {
+  const query = request.query as { tenant_id?: string; status?: string; sort?: string };
+  if (!(await requireTenant(request, reply, query.tenant_id))) return;
+  let clipsQuery = admin.from('clips').select('id, project_id, candidate_id, title, description, hashtags, status, drive_file_id, duration_seconds, created_at, updated_at').eq('tenant_id', query.tenant_id!);
+  if (query.status) clipsQuery = clipsQuery.eq('status', query.status);
+  const { data: clips, error } = await clipsQuery.order(query.sort === 'oldest' ? 'created_at' : 'created_at', { ascending: query.sort === 'oldest' });
+  if (error) return reply.code(503).send({ error: 'Clips are temporarily unavailable' });
+  const ids = (clips ?? []).map(clip => clip.id);
+  if (!ids.length) return { clips: [] };
+  const [{ data: candidates }, { data: performance }, { data: publications }] = await Promise.all([
+    admin.from('clip_candidates').select('id, start_seconds, end_seconds, score, title, reason, hook, category, music_risk, context_risk').in('id', (clips ?? []).map(clip => clip.candidate_id).filter(Boolean)),
+    admin.from('clip_performance').select('clip_id, views, likes, comments, subscribers_gained, average_percentage_viewed, performance_score, last_synced_at').in('clip_id', ids),
+    admin.from('publications').select('clip_id, youtube_video_id, youtube_url, status, published_at').in('clip_id', ids),
+  ]);
+  const candidateById = new Map((candidates ?? []).map(row => [row.id, row]));
+  const performanceByClip = new Map((performance ?? []).map(row => [row.clip_id, row]));
+  const publicationByClip = new Map((publications ?? []).map(row => [row.clip_id, row]));
+  return { clips: (clips ?? []).map(clip => ({ ...clip, candidate: candidateById.get(clip.candidate_id), performance: performanceByClip.get(clip.id) ?? null, publication: publicationByClip.get(clip.id) ?? null })) };
+});
+
+app.get('/v1/clips/:clipId', async (request, reply) => {
+  const { clipId } = request.params as { clipId: string };
+  const { data: clip, error } = await admin.from('clips').select('id, tenant_id, project_id, candidate_id, title, description, hashtags, status, drive_file_id, duration_seconds, local_path, created_at, updated_at').eq('id', clipId).single();
+  if (error || !clip || !(await hasTenantMembership(request.user!.id, clip.tenant_id))) return reply.code(404).send({ error: 'Clip not found' });
+  const [{ data: candidate }, { data: features }, { data: performance }, { data: feedback }, { data: publication }] = await Promise.all([
+    admin.from('clip_candidates').select('start_seconds, end_seconds, score, title, reason, hook, category, music_risk, context_risk, feature_snapshot').eq('id', clip.candidate_id).maybeSingle(),
+    admin.from('clip_features').select('features, source, model, analyzed_at').eq('clip_id', clipId).maybeSingle(),
+    admin.from('clip_performance').select('*').eq('clip_id', clipId).maybeSingle(),
+    admin.from('clip_feedback').select('id, user_id, rating, comment, tags, created_at, updated_at').eq('clip_id', clipId).order('created_at', { ascending: false }),
+    admin.from('publications').select('id, youtube_video_id, youtube_url, channel_id, channel_title, status, published_at, verified_at').eq('clip_id', clipId).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+  ]);
+  return { clip, candidate, features, performance, feedback: feedback ?? [], publication };
+});
+
+app.get('/v1/clips/:clipId/preview', async (request, reply) => {
+  const { clipId } = request.params as { clipId: string };
+  const { data: clip } = await admin.from('clips').select('tenant_id, drive_file_id').eq('id', clipId).maybeSingle();
+  if (!clip || !(await hasTenantMembership(request.user!.id, clip.tenant_id))) return reply.code(404).send({ error: 'Clip not found' });
+  if (!clip.drive_file_id) return reply.code(404).send({ error: 'Clip is not stored in Drive yet' });
+  const token = await getStoredToken(clip.tenant_id, 'drive');
+  if (!token) return reply.code(409).send({ error: 'Drive integration is not connected' });
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(clip.drive_file_id)}?alt=media`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) return reply.code(response.status === 401 ? 401 : 502).send({ error: 'Could not load clip preview' });
+  return reply.type('video/mp4').header('cache-control', 'private, max-age=60').send(Buffer.from(await response.arrayBuffer()));
+});
+
+app.post('/v1/clips/:clipId/feedback', async (request, reply) => {
+  const { clipId } = request.params as { clipId: string };
+  const body = request.body as { rating?: number; comment?: string; tags?: string[] };
+  const { data: clip } = await admin.from('clips').select('tenant_id').eq('id', clipId).maybeSingle();
+  if (!clip || !(await hasTenantMembership(request.user!.id, clip.tenant_id))) return reply.code(404).send({ error: 'Clip not found' });
+  if (body.rating !== 1 && body.rating !== -1) return reply.code(400).send({ error: 'rating must be 1 or -1' });
+  const { data, error } = await admin.from('clip_feedback').upsert({ tenant_id: clip.tenant_id, clip_id: clipId, user_id: request.user!.id, rating: body.rating, comment: body.comment?.trim() || null, tags: Array.isArray(body.tags) ? body.tags.slice(0, 20) : [] }, { onConflict: 'clip_id,user_id' }).select('id, clip_id, rating, comment, tags, created_at, updated_at').single();
+  if (error) return reply.code(400).send({ error: 'Could not save feedback' });
+  return reply.send({ feedback: data });
+});
+
+app.get('/v1/clips/:clipId/performance', async (request, reply) => {
+  const { clipId } = request.params as { clipId: string };
+  const { data: clip } = await admin.from('clips').select('tenant_id').eq('id', clipId).maybeSingle();
+  if (!clip || !(await hasTenantMembership(request.user!.id, clip.tenant_id))) return reply.code(404).send({ error: 'Clip not found' });
+  const [{ data: current }, { data: history }] = await Promise.all([
+    admin.from('clip_performance').select('*').eq('clip_id', clipId).maybeSingle(),
+    admin.from('clip_performance_history').select('*').eq('clip_id', clipId).order('captured_at', { ascending: true }),
+  ]);
+  return { performance: current, history: history ?? [] };
+});
+
+app.get('/v1/analytics/dashboard', async (request, reply) => {
+  const tenantId = (request.query as { tenant_id?: string }).tenant_id;
+  if (!(await requireTenant(request, reply, tenantId))) return;
+  const [{ data: projects }, { data: clips }, { data: performance }, { data: patterns }] = await Promise.all([
+    admin.from('projects').select('id, name, status').eq('tenant_id', tenantId!),
+    admin.from('clips').select('id, status').eq('tenant_id', tenantId!),
+    admin.from('clip_performance').select('clip_id, views, subscribers_gained, performance_score').eq('tenant_id', tenantId!),
+    admin.from('learning_patterns').select('id, name, description, outcome_summary, sample_size, confidence, status').eq('tenant_id', tenantId!).in('status', ['emerging', 'validated']).order('confidence', { ascending: false }),
+  ]);
+  const metrics = performance ?? [];
+  const totalViews = metrics.reduce((sum, row) => sum + Number(row.views ?? 0), 0);
+  const subscribers = metrics.reduce((sum, row) => sum + Number(row.subscribers_gained ?? 0), 0);
+  const scores = metrics.map(row => Number(row.performance_score)).filter(Number.isFinite);
+  return { metrics: { projects: (projects ?? []).length, clips: (clips ?? []).length, published: (clips ?? []).filter(clip => clip.status === 'published').length, totalViews, subscribersGained: subscribers, averageScore: scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null }, patterns: patterns ?? [] };
+});
+
+app.get('/v1/learning/insights', async (request, reply) => {
+  const tenantId = (request.query as { tenant_id?: string }).tenant_id;
+  if (!(await requireTenant(request, reply, tenantId))) return;
+  const { data, error } = await admin.from('learning_patterns').select('id, name, description, feature_filter, outcome_summary, sample_size, confidence, status, last_calculated_at').eq('tenant_id', tenantId!).order('confidence', { ascending: false });
+  if (error) return reply.code(503).send({ error: 'Learning insights are temporarily unavailable' });
+  return { insights: data ?? [] };
 });
 app.get('/v1/master/metrics', async (request, reply) => {
   const { data: profile } = await admin.from('profiles').select('is_master_admin').eq('id', request.user!.id).single();

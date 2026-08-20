@@ -79,3 +79,13 @@ export async function uploadVideoToYouTube(supabase: SupabaseClient, tenantId: s
     throw err;
   }
 }
+
+export async function fetchYoutubeVideoMetrics(supabase: SupabaseClient, tenantId: string, videoId: string) {
+  const token = await getAccessToken(supabase, tenantId, 'youtube');
+  const response = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=statistics,contentDetails,snippet&id=${encodeURIComponent(videoId)}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new Error('YouTube metrics failed: ' + response.status + ' ' + await response.text());
+  const data = (await response.json()) as { items?: Array<{ snippet?: { publishedAt?: string; channelId?: string; channelTitle?: string }; statistics?: { viewCount?: string; likeCount?: string; commentCount?: string } }> };
+  const item = data.items?.[0];
+  if (!item) throw new Error('YouTube video was not found for metrics sync');
+  return { views: Number(item.statistics?.viewCount ?? 0), likes: Number(item.statistics?.likeCount ?? 0), comments: Number(item.statistics?.commentCount ?? 0), publishedAt: item.snippet?.publishedAt ?? null, channelId: item.snippet?.channelId ?? null, channelTitle: item.snippet?.channelTitle ?? null };
+}

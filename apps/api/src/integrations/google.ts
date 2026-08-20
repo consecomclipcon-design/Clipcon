@@ -6,7 +6,7 @@ import { admin } from '../supabase.js';
 export type GoogleProvider = 'drive' | 'youtube';
 
 export const driveScopes = ['https://www.googleapis.com/auth/drive.file'];
-export const youtubeScopes = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/youtube.upload'];
+export const youtubeScopes = ['https://www.googleapis.com/auth/youtube.readonly', 'https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/yt-analytics.readonly'];
 
 export function getProviderScopes(provider: GoogleProvider) {
   return provider === 'youtube' ? youtubeScopes : driveScopes;
@@ -96,7 +96,7 @@ export async function getStoredToken(tenantId: string, provider: GoogleProvider)
   const accessToken = decryptToken(data.encrypted_access_token);
   const refreshToken = data.encrypted_refresh_token ? decryptToken(data.encrypted_refresh_token) : null;
   const expiresAt = data.token_expires_at ? new Date(data.token_expires_at).getTime() : 0;
-  if (refreshToken && expiresAt && expiresAt - Date.now() < 60_000) {
+  if (refreshToken && (!expiresAt || expiresAt - Date.now() < 60_000)) {
     try {
       const client = createGoogleClient();
       client.setCredentials({ refresh_token: refreshToken });
