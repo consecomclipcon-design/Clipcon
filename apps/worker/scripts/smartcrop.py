@@ -1,4 +1,5 @@
 import json
+import glob
 import sys
 
 import cv2
@@ -13,7 +14,10 @@ def detect(video_path, start, duration):
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     if width <= 0 or height <= 0:
         raise RuntimeError("smart crop could not read video dimensions")
-    face = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    cascade_paths = glob.glob("/usr/**/haarcascade_frontalface_default.xml", recursive=True)
+    if not cascade_paths:
+        raise RuntimeError("smart crop face cascade is not installed")
+    face = cv2.CascadeClassifier(cascade_paths[0])
     people = cv2.HOGDescriptor()
     people.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
     sample_step = 0.5
