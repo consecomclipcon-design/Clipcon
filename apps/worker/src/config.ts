@@ -9,7 +9,12 @@ export const config = {
   GROQ_API_KEY: process.env.GROQ_API_KEY ?? null,
   GROQ_TRANSCRIPTION_MODEL: process.env.GROQ_TRANSCRIPTION_MODEL ?? null,
   GROQ_ANALYSIS_MODEL: process.env.GROQ_ANALYSIS_MODEL ?? null,
+  GROQ_VISION_MODEL: process.env.GROQ_VISION_MODEL ?? null,
   ytdlpCookiesB64: process.env.YTDLP_COOKIES ?? null,
+  ytdlpPoToken: process.env.YTDLP_PO_TOKEN ?? null,
+  maxDownloadSeconds: Math.max(60, Number(process.env.YTDLP_MAX_DOWNLOAD_SECONDS ?? 3600)),
+  downloadTimeoutMs: Math.max(60_000, Number(process.env.YTDLP_DOWNLOAD_TIMEOUT_MS ?? 12 * 60_000)),
+  maxJobMs: Math.max(60_000, Number(process.env.WORKER_MAX_JOB_MS ?? 45 * 60_000)),
   pollMs: Math.max(500, Number(process.env.WORKER_POLL_MS ?? 2000)),
   maxAttempts: Math.min(5, Math.max(1, Number(process.env.WORKER_MAX_ATTEMPTS ?? 5))),
 };

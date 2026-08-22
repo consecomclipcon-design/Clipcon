@@ -12,9 +12,25 @@ RUN npm run build --workspace apps/worker
 FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-RUN apk add --no-cache ffmpeg python3 py3-pip py3-opencv deno fontconfig ttf-dejavu && pip3 install --break-system-packages --upgrade yt-dlp
+
+# Runtime deps: ffmpeg, python (smart crop), deno (yt-dlp JS runtime), fonts, git (bgutil clone)
+RUN set -ex && apk add --no-cache ffmpeg python3 py3-pip py3-opencv deno fontconfig ttf-dejavu git curl \
+    && pip3 install --break-system-packages --upgrade --no-cache-dir yt-dlp bgutil-ytdlp-pot-provider \
+    && which ffmpeg && which yt-dlp \
+    && yt-dlp --version
+
+# bgutil PO Token Provider HTTP server (Node implementation) on port 4416
+RUN set -ex && git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-pot-provider \
+    && cd /opt/bgutil-pot-provider/server \
+    && yarn install --frozen-lockfile 2>/dev/null || npm ci \
+    && npx tsc \
+    && ls build/main.js
+
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/apps/worker/package.json apps/worker/package.json
 COPY --from=build /app/apps/worker/dist apps/worker/dist
 COPY apps/worker/scripts apps/worker/scripts
-CMD ["node", "apps/worker/dist/worker.js"]
+COPY railway-worker-entrypoint.sh ./railway-worker-entrypoint.sh
+RUN chmod +x ./railway-worker-entrypoint.sh
+EXPOSE 4000 4416
+CMD ["./railway-worker-entrypoint.sh"]
