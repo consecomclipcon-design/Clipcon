@@ -21,6 +21,7 @@ type Publication = { id: string; status: string; youtube_url?: string | null; cl
 type ClipJob = { id: string; project_id: string; status: string; clips_count: number; error_message?: string | null; created_at: string };
 type GoogleStatus = { connected: boolean; accountLabel: string | null; accountEmail: string | null };
 const jobLabel = (status: string) => ({ queued: "Na fila", processing: "Processando", completed: "Concluído", error: "Erro", failed: "Erro", active: "Ativo" }[status] ?? status);
+const chipVariant = (status: string) => ({ queued: "is-queued", processing: "is-running", active: "is-running", completed: "is-done", ready: "is-done", published: "is-done", error: "is-error", failed: "is-error" }[status] ?? "");
 
 export function ClipsWorkspaceView({
   tenantId,
@@ -350,11 +351,11 @@ export function ClipsWorkspaceView({
               <div className="media-source-picker">
                 <span className="field-caption">Fonte de mídia</span>
                 <div className="media-source-options">
-                  <button type="button" className="media-source-option" onClick={() => setMediaSource("url")}>
+                  <button type="button" className={mediaSource === "url" ? "media-source-option active" : "media-source-option"} onClick={() => setMediaSource("url")}>
                     <span>🔗</span>
                     <strong>Link do YouTube</strong><small>Cole a URL do vídeo</small>
                   </button>
-                  <button type="button" className="media-source-option" onClick={() => setMediaSource("file")}>
+                  <button type="button" className={mediaSource === "file" ? "media-source-option active" : "media-source-option"} onClick={() => setMediaSource("file")}>
                     <span>📁</span>
                     <strong>Arquivo local</strong><small>Envie um vídeo do computador</small>
                   </button>
@@ -388,7 +389,7 @@ export function ClipsWorkspaceView({
                   </button>
                 </div>
               )}
-              <button disabled={busy || !workspaceId} type="submit">
+              <button disabled={busy || !workspaceId} type="submit" className="primary">
                 {busy ? "Processando..." : "Criar clips"} <span>↗</span>
               </button>
               {status && <p className="form-note">{status}</p>}
@@ -405,7 +406,7 @@ export function ClipsWorkspaceView({
                 <strong>{project.name}</strong>
                 <small>{new Date(project.created_at).toLocaleString("pt-BR")}</small>
               </div>
-              <span className="status-chip">{jobLabel(clipJobs.find((job) => job.project_id === project.id)?.status ?? project.status)}</span>
+              <span className={`status-chip ${chipVariant(clipJobs.find((job) => job.project_id === project.id)?.status ?? project.status)}`}>{jobLabel(clipJobs.find((job) => job.project_id === project.id)?.status ?? project.status)}</span>
               </button>
             )) : <p className="muted">Nenhum vídeo criado nesta workspace.</p>}
           {openProjectId && (

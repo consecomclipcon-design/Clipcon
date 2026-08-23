@@ -32,6 +32,7 @@
     const n = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs)) {
       if (k === "class") n.className = v;
+      else if (k === "text") n.textContent = String(v);
       else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
       else n.setAttribute(k, v);
     }
