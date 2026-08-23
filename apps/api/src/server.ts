@@ -11,6 +11,8 @@ import {
   fetchAccountLabel,
   getProviderScopes,
   getStoredToken,
+  listDriveFolders,
+  createDriveFolder,
   googleConfigured,
   signOAuthState,
   verifyOAuthState,
@@ -24,6 +26,7 @@ const app = Fastify({
   logger: { redact: ["req.headers.authorization", "req.headers.cookie"] },
 });
 await app.register(cors, { origin: config.WEB_ORIGIN });
+await app.register(import("@fastify/multipart"));
 for (const mediaType of [
   "application/octet-stream",
   "video/mp4",
@@ -242,7 +245,7 @@ app.get("/v1/workspaces/:workspaceId", async (request, reply) => {
     admin
       .from("integrations")
       .select("provider, account_email, metadata, connected_at, last_error")
-      .eq("tenant_id", workspace.tenant_id)
+      .eq("workspace_id", workspace.id)
       .in("provider", ["drive", "youtube"]),
   ]);
   return { workspace, brandKit, integrations: integrations ?? [] };
@@ -298,6 +301,19 @@ app.get("/v1/workspaces/:workspaceId/brand-kit", async (request, reply) => {
   return { brandKit: data };
 });
 
+app.get("/v1/workspaces/:workspaceId/clip-jobs", async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: "Workspace not found" });
+  const { data, error } = await admin
+    .from("clip_studio_runs")
+    .select("id, project_id, status, candidates_count, clips_count, error_message, settings, created_at, completed_at, projects(name)")
+    .eq("workspace_id", workspace.id)
+    .order("created_at", { ascending: false })
+    .limit(50);
+  if (error) return reply.code(503).send({ error: "Clip jobs unavailable" });
+  return { jobs: data ?? [] };
+});
+
 app.put("/v1/workspaces/:workspaceId/brand-kit", async (request, reply) => {
   const workspace = await getWorkspaceForUser(
     (request.params as { workspaceId: string }).workspaceId,
@@ -326,6 +342,66 @@ app.put("/v1/workspaces/:workspaceId/brand-kit", async (request, reply) => {
     .single();
   if (error) return reply.code(400).send({ error: "Could not save Brand Kit" });
   return { brandKit: data };
+});
+
+app.post("/v1/workspaces/:workspaceId/brand-kit/analyze", async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: "Workspace not found" });
+  const query = request.query as { filename?: string; mime_type?: string };
+  const mimeType = query.mime_type ?? request.headers["content-type"]?.split(";")[0] ?? "";
+  const filename = query.filename?.trim() || "brand-kit-reference.mp4";
+  const body = request.body as Buffer;
+  if (!mimeType.startsWith("video/") || !Buffer.isBuffer(body) || body.length === 0)
+    return reply.code(400).send({ error: "A non-empty video reference is required" });
+  if (body.length > 100 * 1024 * 1024)
+    return reply.code(413).send({ error: "Brand Kit reference video must be smaller than 100 MB" });
+  const analysisId = randomUUID();
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 180);
+  const storagePath = `${workspace.tenant_id}/${workspace.id}/brand-kit/${analysisId}/${safeName}`;
+  const uploaded = await admin.storage.from("clipcon-media").upload(storagePath, body, { contentType: mimeType, upsert: false });
+  if (uploaded.error) return reply.code(503).send({ error: "Could not store Brand Kit reference video" });
+  const { data: analysis, error: analysisError } = await admin
+    .from("brand_kit_analyses")
+    .insert({ id: analysisId, tenant_id: workspace.tenant_id, workspace_id: workspace.id, storage_path: storagePath, filename: safeName, created_by: request.user!.id })
+    .select("id, status, filename, duration_seconds, result, error_message, created_at, completed_at")
+    .single();
+  if (analysisError || !analysis) {
+    await admin.storage.from("clipcon-media").remove([storagePath]);
+    return reply.code(503).send({ error: "Could not create Brand Kit analysis" });
+  }
+  const { error: jobError } = await admin.from("processing_jobs").insert({
+    tenant_id: workspace.tenant_id,
+    type: "brand_kit_analysis",
+    artifacts: { analysisId },
+  });
+  if (jobError) return reply.code(503).send({ error: "Could not queue Brand Kit analysis" });
+  return reply.code(202).send({ analysis });
+});
+
+app.get("/v1/workspaces/:workspaceId/brand-kit/analyses", async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: "Workspace not found" });
+  const { data, error } = await admin
+    .from("brand_kit_analyses")
+    .select("id, status, filename, duration_seconds, result, error_message, created_at, completed_at")
+    .eq("workspace_id", workspace.id)
+    .order("created_at", { ascending: false })
+    .limit(10);
+  if (error) return reply.code(503).send({ error: "Brand Kit analyses unavailable" });
+  return { analyses: data ?? [] };
+});
+
+app.get("/v1/workspaces/:workspaceId/brand-kit/analyses/:analysisId", async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: "Workspace not found" });
+  const { data, error } = await admin
+    .from("brand_kit_analyses")
+    .select("id, status, filename, duration_seconds, result, error_message, created_at, completed_at")
+    .eq("id", (request.params as { analysisId: string }).analysisId)
+    .eq("workspace_id", workspace.id)
+    .maybeSingle();
+  if (error || !data) return reply.code(404).send({ error: "Brand Kit analysis not found" });
+  return { analysis: data };
 });
 
 app.get("/v1/ai/providers", async (request) => {
@@ -448,14 +524,23 @@ app.post("/v1/projects", async (request, reply) => {
     strategy?: string;
     strategy_config?: Record<string, unknown>;
     source_url?: string;
+    secondary_source_url?: string;
+    clip_mode?: boolean;
+    composition_mode?: "primary_only" | "split_screen";
+    auto_publish?: boolean;
+    secondary_ratio?: number;
   };
   const tenantId = body?.tenant_id;
   const sourceUrl = body?.source_url?.trim();
-  const name = body?.name?.trim();
+  const secondarySourceUrl = body?.secondary_source_url?.trim();
+  const compositionMode = body?.composition_mode === "split_screen" ? "split_screen" : "primary_only";
   const videoId = sourceUrl ? youtubeVideoId(sourceUrl) : null;
-  if (!tenantId || !sourceUrl || !name || !videoId)
+  const folderStamp = new Date().toISOString().replace("T", " ").slice(0, 16).replace(/:/g, "-");
+  const name = body?.name?.trim() || (body?.clip_mode && sourceUrl ? `Vídeo ${videoId ?? "novo"} · ${folderStamp}` : "");
+  const secondaryVideoId = compositionMode === "split_screen" && secondarySourceUrl ? youtubeVideoId(secondarySourceUrl) : null;
+  if (!tenantId || !name || (sourceUrl && !videoId) || (compositionMode === "split_screen" && (!secondarySourceUrl || !secondaryVideoId)))
     return reply.code(400).send({
-      error: "Project name, tenant and valid YouTube URL are required",
+      error: "Project name and tenant are required; source URL must be a valid YouTube URL",
     });
   const { data: membership } = await admin
     .from("tenant_members")
@@ -465,24 +550,20 @@ app.post("/v1/projects", async (request, reply) => {
     .maybeSingle();
   if (!membership)
     return reply.code(403).send({ error: "Tenant access required" });
-  const { data: workspace } = body.workspace_id
-    ? await admin
-        .from("workspaces")
-        .select("id, tenant_id")
-        .eq("id", body.workspace_id)
-        .eq("tenant_id", tenantId)
-        .maybeSingle()
-    : await admin
-        .from("workspaces")
-        .select("id, tenant_id")
-        .eq("tenant_id", tenantId)
-        .order("created_at")
-        .limit(1)
-        .maybeSingle();
+  const { data: workspaceRows } = await admin
+    .from("workspaces")
+    .select("id, tenant_id, created_at")
+    .eq("tenant_id", tenantId)
+    .order("created_at");
+  const workspace = body.workspace_id
+    ? workspaceRows?.find((row) => row.id === body.workspace_id) ?? null
+    : workspaceRows?.[0] ?? null;
   if (!workspace)
     return reply
       .code(400)
       .send({ error: "Workspace is required and must belong to the tenant" });
+  if (!(await getWorkspaceForUser(workspace.id, request.user!.id)))
+    return reply.code(403).send({ error: "Workspace access required" });
   const { data: project, error: projectError } = await admin
     .from("projects")
     .insert({
@@ -500,6 +581,7 @@ app.post("/v1/projects", async (request, reply) => {
     .single();
   if (projectError)
     return reply.code(400).send({ error: "Could not create project" });
+  if (!sourceUrl || !videoId) return reply.code(201).send({ project, video: null });
   const { data: video, error: videoError } = await admin
     .from("source_videos")
     .insert({
@@ -507,6 +589,7 @@ app.post("/v1/projects", async (request, reply) => {
       project_id: project.id,
       youtube_video_id: videoId,
       source_url: sourceUrl,
+      role: "primary",
     })
     .select("id, status")
     .single();
@@ -519,15 +602,78 @@ app.post("/v1/projects", async (request, reply) => {
           : "Could not register source video",
     });
   }
-  const { error: jobError } = await admin.from("processing_jobs").insert({
-    tenant_id: tenantId,
-    project_id: project.id,
-    source_video_id: video.id,
-    type: "download_video",
-  });
-  if (jobError) {
-    await admin.from("projects").delete().eq("id", project.id);
-    return reply.code(503).send({ error: "Could not enqueue processing job" });
+  const sources = [video];
+  if (secondarySourceUrl && secondaryVideoId) {
+    const { data: secondaryVideo, error: secondaryError } = await admin
+      .from("source_videos")
+      .insert({
+        tenant_id: tenantId,
+        project_id: project.id,
+        youtube_video_id: secondaryVideoId,
+        source_url: secondarySourceUrl,
+        role: "secondary",
+      })
+      .select("id, status")
+      .single();
+    if (secondaryError || !secondaryVideo) {
+      await admin.from("projects").delete().eq("id", project.id);
+      return reply.code(secondaryError?.code === "23505" ? 409 : 400).send({
+        error: secondaryError?.code === "23505" ? "This secondary video is already registered" : "Could not register secondary source video",
+      });
+    }
+    sources.push(secondaryVideo);
+  }
+  if (!body.clip_mode) {
+    const { error: jobError } = await admin.from("processing_jobs").insert(
+      sources.map((source) => ({
+        tenant_id: tenantId,
+        project_id: project.id,
+        source_video_id: source.id,
+        type: "download_video",
+      })),
+    );
+    if (jobError) {
+      await admin.from("projects").delete().eq("id", project.id);
+      return reply.code(503).send({ error: "Could not enqueue processing job" });
+    }
+  }
+  if (body.clip_mode) {
+    const { data: run, error: runError } = await admin
+      .from("clip_studio_runs")
+      .insert({
+        tenant_id: tenantId,
+        workspace_id: workspace.id,
+        project_id: project.id,
+        asset_id: null,
+        settings: {
+          duration_preset: "45-90",
+          format: "full_screen",
+          style: "retention",
+          secondary_ratio: Math.min(0.8, Math.max(0.2, Number(body.secondary_ratio ?? 0.5))),
+          composition_mode: compositionMode,
+          auto_publish: Boolean(body.auto_publish),
+          secondary_source_video_id: compositionMode === "split_screen" ? sources[1]?.id ?? null : null,
+        },
+        created_by: request.user!.id,
+      })
+      .select("id, status, settings, created_at")
+      .single();
+    if (runError || !run) {
+      await admin.from("projects").delete().eq("id", project.id);
+      return reply.code(503).send({ error: "Could not create Clip Studio run" });
+    }
+    const { error: clipJobError } = await admin.from("processing_jobs").insert({
+      tenant_id: tenantId,
+      project_id: project.id,
+      type: "clip_studio",
+      artifacts: {
+        runId: run.id,
+        sourceVideoId: video.id,
+        secondarySourceVideoId: sources[1]?.id ?? null,
+      },
+    });
+    if (clipJobError) return reply.code(503).send({ error: "Could not queue Clip Studio run" });
+    return reply.code(201).send({ project, video, run });
   }
   return reply.code(201).send({ project, video });
 });
@@ -549,12 +695,41 @@ const supportedMedia = new Map([
 async function getProjectForUser(projectId: string, userId: string) {
   const { data: project } = await admin
     .from("projects")
-    .select("id, tenant_id")
+    .select("id, tenant_id, workspace_id")
     .eq("id", projectId)
     .maybeSingle();
-  if (!project || !(await hasTenantMembership(userId, project.tenant_id)))
+  if (
+    !project ||
+    !(await hasTenantMembership(userId, project.tenant_id)) ||
+    !(await getWorkspaceForUser(project.workspace_id, userId))
+  )
     return null;
   return project;
+}
+
+async function getPublicationForUser(
+  publicationId: string,
+  userId: string,
+) {
+  const { data: publication } = await admin
+    .from("publications")
+    .select("id, clip_id, tenant_id, status")
+    .eq("id", publicationId)
+    .maybeSingle();
+  if (
+    !publication ||
+    !(await hasTenantMembership(userId, publication.tenant_id))
+  )
+    return null;
+  const { data: clip } = await admin
+    .from("clips")
+    .select("project_id")
+    .eq("id", publication.clip_id)
+    .maybeSingle();
+  if (!clip) return null;
+  const project = await getProjectForUser(clip.project_id, userId);
+  if (!project) return null;
+  return publication;
 }
 
 app.get("/v1/projects/:projectId/assets", async (request, reply) => {
@@ -784,6 +959,149 @@ app.post(
     return reply.code(201).send({ asset });
   },
 );
+
+app.post(
+  "/v1/projects/:projectId/assets/upload",
+  async (request, reply) => {
+    const { projectId } = request.params as { projectId: string };
+    const project = await getProjectForUser(projectId, request.user!.id);
+    if (!project) return reply.code(404).send({ error: "Project not found" });
+
+    const data = await request.file({
+      limits: { fileSize: 500 * 1024 * 1024 },
+    });
+    if (!data) return reply.code(400).send({ error: "No file uploaded" });
+
+    const mimeType = data.mimetype;
+    const kind = supportedMedia.get(mimeType);
+    if (!kind) return reply.code(400).send({ error: "Unsupported media format" });
+
+    const buffer = await data.toBuffer();
+    if (!buffer.length || buffer.length > 500 * 1024 * 1024)
+      return reply.code(400).send({ error: "Media must be between 1 byte and 500 MB" });
+
+    const filename = data.filename
+      .replace(/[^a-zA-Z0-9._-]/g, "_")
+      .slice(0, 180);
+    const assetId = randomUUID();
+    const storagePath = `${project.tenant_id}/${projectId}/${assetId}/${filename}`;
+
+    const { error: uploadError } = await admin.storage
+      .from("clipcon-media")
+      .upload(storagePath, buffer, { contentType: mimeType, upsert: false });
+    if (uploadError)
+      return reply.code(503).send({ error: "Could not store uploaded media" });
+
+    const { data: asset, error: assetError } = await admin
+      .from("media_assets")
+      .insert({
+        id: assetId,
+        tenant_id: project.tenant_id,
+        project_id: projectId,
+        name: data.filename,
+        kind,
+        mime_type: mimeType,
+        storage_path: storagePath,
+        size_bytes: buffer.length,
+        status: "uploaded",
+        created_by: request.user!.id,
+      })
+      .select(
+        "id, name, kind, mime_type, size_bytes, status, created_at, updated_at",
+      )
+      .single();
+
+    if (assetError) {
+      await admin.storage.from("clipcon-media").remove([storagePath]);
+      return reply.code(503).send({ error: "Could not register uploaded media" });
+    }
+
+    const { error: jobError } = await admin.from("processing_jobs").insert({
+      tenant_id: project.tenant_id,
+      project_id: projectId,
+      type: "process_asset",
+      artifacts: { assetId },
+    });
+    if (jobError)
+      return reply.code(503).send({
+        error: "Media was stored but could not be queued for processing",
+      });
+
+    return reply.code(201).send({ asset });
+  },
+);
+
+app.get("/v1/workspaces/:workspaceId/review", async (request, reply) => {
+  const workspace = await getWorkspaceForUser(
+    (request.params as { workspaceId: string }).workspaceId,
+    request.user!.id,
+  );
+  if (!workspace) return reply.code(404).send({ error: "Workspace not found" });
+  const { data: projects } = await admin
+    .from("projects")
+    .select("id")
+    .eq("workspace_id", workspace.id);
+  const projectIds = (projects ?? []).map((p) => p.id);
+  if (!projectIds.length) return { publications: [] };
+  const { data: clips } = await admin
+    .from("clips")
+    .select(
+      "id, project_id, title, headline, status, duration_seconds, output_asset_id, drive_file_id, created_at",
+    )
+    .in("project_id", projectIds)
+    .order("created_at", { ascending: false })
+    .limit(200);
+  const clipIds = (clips ?? []).map((c) => c.id);
+  if (!clipIds.length) return { publications: [] };
+  const { data: publications } = await admin
+    .from("publications")
+    .select(
+      "id, clip_id, status, youtube_video_id, youtube_url, error_message, created_at, published_at, updated_at",
+    )
+    .in("clip_id", clipIds)
+    .order("created_at", { ascending: false });
+  const clipById = new Map((clips ?? []).map((c) => [c.id, c]));
+  const assetIds = (clips ?? [])
+    .map((c) => c.output_asset_id)
+    .filter(Boolean) as string[];
+  const assets = assetIds.length
+    ? await admin
+        .from("media_assets")
+        .select("id, name, status, size_bytes, duration_seconds, storage_path")
+        .in("id", assetIds)
+    : { data: [] };
+  const assetById = new Map((assets.data ?? []).map((a) => [a.id, a]));
+  const items = [];
+  for (const publication of publications ?? []) {
+    const clip = clipById.get(publication.clip_id);
+    if (!clip) continue;
+    const asset = clip.output_asset_id
+      ? assetById.get(clip.output_asset_id)
+      : null;
+    let videoUrl: string | null = null;
+    if (asset?.storage_path) {
+      const signed = await admin.storage
+        .from("clipcon-media")
+        .createSignedUrl(asset.storage_path, 60 * 60 * 4);
+      videoUrl = signed.data?.signedUrl ?? null;
+    }
+    items.push({
+      ...publication,
+      clip,
+      asset: asset
+        ? {
+            id: asset.id,
+            name: asset.name,
+            status: asset.status,
+            size_bytes: asset.size_bytes,
+            duration_seconds: asset.duration_seconds,
+          }
+        : null,
+      videoUrl,
+    });
+  }
+  return { publications: items };
+});
 
 app.get("/v1/assets/:assetId/url", async (request, reply) => {
   const { assetId } = request.params as { assetId: string };
@@ -1043,6 +1361,7 @@ app.post("/v1/projects/:projectId/clip-studio", async (request, reply) => {
     brand_kit_id?: string;
     secondary_asset_id?: string;
     secondary_ratio?: number;
+    composition_mode?: "primary_only" | "split_screen";
     auto_publish?: boolean;
   };
   const { data: asset } = body.asset_id
@@ -1085,6 +1404,7 @@ app.post("/v1/projects/:projectId/clip-studio", async (request, reply) => {
     style: body.style ?? "retention",
     brand_kit_id: body.brand_kit_id ?? null,
     secondary_asset_id: secondaryAsset?.id ?? null,
+    composition_mode: body.composition_mode === "split_screen" ? "split_screen" : "primary_only",
     secondary_ratio: Math.min(
       0.8,
       Math.max(0.2, Number(body.secondary_ratio ?? 0.5)),
@@ -1135,6 +1455,106 @@ app.get("/v1/projects/:projectId/clip-studio", async (request, reply) => {
   if (error)
     return reply.code(503).send({ error: "Clip Studio runs unavailable" });
   return { runs: data ?? [] };
+});
+
+app.get("/v1/projects/:projectId/publications", async (request, reply) => {
+  const { projectId } = request.params as { projectId: string };
+  const project = await getProjectForUser(projectId, request.user!.id);
+  if (!project) return reply.code(404).send({ error: "Project not found" });
+  const { data: clips } = await admin
+    .from("clips")
+    .select(
+      "id, title, headline, status, duration_seconds, output_asset_id, created_at",
+    )
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false });
+  const clipIds = (clips ?? []).map((clip) => clip.id);
+  const { data: publications, error } = clipIds.length
+    ? await admin
+        .from("publications")
+        .select(
+          "id, clip_id, status, youtube_video_id, youtube_url, error_message, created_at, published_at",
+        )
+        .in("clip_id", clipIds)
+        .order("created_at", { ascending: false })
+    : { data: [] as Array<Record<string, unknown>>, error: null as Error | null };
+  if (error)
+    return reply
+      .code(503)
+      .send({ error: "Publications are temporarily unavailable" });
+  const clipById = new Map(
+    (clips ?? []).map((clip) => [clip.id, clip]),
+  );
+  return {
+    publications: (publications ?? []).map((publication) => ({
+      ...publication,
+      clip: clipById.get(publication.clip_id as string) ?? null,
+    })),
+  };
+});
+
+app.post("/v1/publications/:publicationId/approve", async (request, reply) => {
+  const { publicationId } = request.params as { publicationId: string };
+  const publication = await getPublicationForUser(
+    publicationId,
+    request.user!.id,
+  );
+  if (!publication)
+    return reply.code(404).send({ error: "Publication not found" });
+  if (publication.status === "published")
+    return reply.code(200).send({ ok: true });
+  if (publication.status === "cancelled")
+    return reply
+      .code(400)
+      .send({ error: "This publication was already rejected" });
+  const { data: clip } = await admin
+    .from("clips")
+    .select("id, project_id")
+    .eq("id", publication.clip_id)
+    .single();
+  if (!clip) return reply.code(404).send({ error: "Clip not found" });
+  const { error: updErr } = await admin
+    .from("publications")
+    .update({ status: "uploading", updated_at: new Date().toISOString() })
+    .eq("id", publicationId);
+  if (updErr)
+    return reply.code(503).send({ error: "Could not approve publication" });
+  await admin
+    .from("clips")
+    .update({ status: "approved", updated_at: new Date().toISOString() })
+    .eq("id", publication.clip_id);
+  const { error: queueError } = await admin.from("processing_jobs").insert({
+    tenant_id: publication.tenant_id,
+    project_id: clip.project_id,
+    type: "publish_youtube",
+    artifacts: { clipId: publication.clip_id, publicationId },
+  });
+  if (queueError)
+    return reply.code(503).send({ error: "Could not queue publishing" });
+  return reply.code(200).send({ ok: true });
+});
+
+app.post("/v1/publications/:publicationId/reject", async (request, reply) => {
+  const { publicationId } = request.params as { publicationId: string };
+  const publication = await getPublicationForUser(
+    publicationId,
+    request.user!.id,
+  );
+  if (!publication)
+    return reply.code(404).send({ error: "Publication not found" });
+  if (publication.status === "published")
+    return reply.code(400).send({ error: "Already published" });
+  const { error: updErr } = await admin
+    .from("publications")
+    .update({ status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", publicationId);
+  if (updErr)
+    return reply.code(503).send({ error: "Could not reject publication" });
+  await admin
+    .from("clips")
+    .update({ status: "rejected", updated_at: new Date().toISOString() })
+    .eq("id", publication.clip_id);
+  return reply.code(200).send({ ok: true });
 });
 
 app.get("/v1/projects/:projectId", async (request, reply) => {
@@ -1232,6 +1652,26 @@ app.get("/v1/clips", async (request, reply) => {
   };
 });
 
+app.get("/v1/notifications", async (request) => {
+  const { data } = await admin
+    .from("notifications")
+    .select("id, type, title, message, read_at, created_at")
+    .eq("user_id", request.user!.id)
+    .order("created_at", { ascending: false })
+    .limit(30);
+  return { notifications: data ?? [] };
+});
+
+app.post("/v1/notifications/:notificationId/read", async (request, reply) => {
+  const { error } = await admin
+    .from("notifications")
+    .update({ read_at: new Date().toISOString() })
+    .eq("id", (request.params as { notificationId: string }).notificationId)
+    .eq("user_id", request.user!.id);
+  if (error) return reply.code(400).send({ error: "Could not mark notification as read" });
+  return { ok: true };
+});
+
 app.get("/v1/clips/:clipId", async (request, reply) => {
   const { clipId } = request.params as { clipId: string };
   const { data: clip, error } = await admin
@@ -1300,14 +1740,14 @@ app.get("/v1/clips/:clipId/preview", async (request, reply) => {
   const { clipId } = request.params as { clipId: string };
   const { data: clip } = await admin
     .from("clips")
-    .select("tenant_id, drive_file_id")
+    .select("tenant_id, drive_file_id, workspace_id")
     .eq("id", clipId)
     .maybeSingle();
-  if (!clip || !(await hasTenantMembership(request.user!.id, clip.tenant_id)))
+  if (!clip || !(await hasTenantMembership(request.user!.id, clip.tenant_id)) || !(await getWorkspaceForUser(clip.workspace_id, request.user!.id)))
     return reply.code(404).send({ error: "Clip not found" });
   if (!clip.drive_file_id)
     return reply.code(404).send({ error: "Clip is not stored in Drive yet" });
-  const token = await getStoredToken(clip.tenant_id, "drive");
+  const token = await getStoredToken(clip.tenant_id, "drive", clip.workspace_id);
   if (!token)
     return reply
       .code(409)
@@ -1507,11 +1947,12 @@ app.get("/v1/integrations/google/start", async (request, reply) => {
     return reply
       .code(503)
       .send({ error: "Google integration is not configured" });
-  const query = request.query as { tenant_id?: string; provider?: string };
+  const query = request.query as { tenant_id?: string; workspace_id?: string; provider?: string };
   const tenantId = query.tenant_id;
+  const workspaceId = query.workspace_id;
   const provider = query.provider as GoogleProvider | undefined;
-  if (!tenantId)
-    return reply.code(400).send({ error: "tenant_id is required" });
+  if (!tenantId || !workspaceId)
+    return reply.code(400).send({ error: "tenant_id and workspace_id are required" });
   if (provider !== "drive" && provider !== "youtube")
     return reply.code(400).send({ error: "provider must be drive or youtube" });
   const { data: membership } = await admin
@@ -1522,20 +1963,25 @@ app.get("/v1/integrations/google/start", async (request, reply) => {
     .maybeSingle();
   if (!membership)
     return reply.code(403).send({ error: "Tenant access required" });
+  const workspace = await getWorkspaceForUser(workspaceId, request.user!.id);
+  if (!workspace || workspace.tenant_id !== tenantId)
+    return reply.code(403).send({ error: "Workspace access required" });
   const client = createGoogleClient();
   return {
     url: client.generateAuthUrl({
       access_type: "offline",
       prompt: "consent",
       scope: getProviderScopes(provider),
-      state: signOAuthState(request.user!.id, tenantId, provider),
+       state: signOAuthState(request.user!.id, tenantId, workspaceId, provider),
     }),
   };
 });
 app.get("/v1/integrations/google/status", async (request, reply) => {
-  const tenantId = (request.query as { tenant_id?: string }).tenant_id;
-  if (!tenantId)
-    return reply.code(400).send({ error: "tenant_id is required" });
+  const query = request.query as { tenant_id?: string; workspace_id?: string };
+  const tenantId = query.tenant_id;
+  const workspaceId = query.workspace_id;
+  if (!tenantId || !workspaceId)
+    return reply.code(400).send({ error: "tenant_id and workspace_id are required" });
   const { data: membership } = await admin
     .from("tenant_members")
     .select("tenant_id")
@@ -1544,10 +1990,13 @@ app.get("/v1/integrations/google/status", async (request, reply) => {
     .maybeSingle();
   if (!membership)
     return reply.code(403).send({ error: "Tenant access required" });
+  const workspace = await getWorkspaceForUser(workspaceId, request.user!.id);
+  if (!workspace || workspace.tenant_id !== tenantId)
+    return reply.code(403).send({ error: "Workspace access required" });
   const { data: integrations } = await admin
     .from("integrations")
     .select("provider, account_email, metadata, connected_at, last_error")
-    .eq("tenant_id", tenantId)
+    .eq("workspace_id", workspaceId)
     .in("provider", ["drive", "youtube"]);
   const byProvider: Record<
     string,
@@ -1581,11 +2030,12 @@ app.get("/v1/integrations/google/status", async (request, reply) => {
   };
 });
 app.delete("/v1/integrations/google/disconnect", async (request, reply) => {
-  const query = request.query as { tenant_id?: string; provider?: string };
+  const query = request.query as { tenant_id?: string; workspace_id?: string; provider?: string };
   const tenantId = query.tenant_id;
+  const workspaceId = query.workspace_id;
   const provider = query.provider as GoogleProvider | undefined;
-  if (!tenantId)
-    return reply.code(400).send({ error: "tenant_id is required" });
+  if (!tenantId || !workspaceId)
+    return reply.code(400).send({ error: "tenant_id and workspace_id are required" });
   if (provider !== "drive" && provider !== "youtube")
     return reply.code(400).send({ error: "provider must be drive or youtube" });
   const { data: membership } = await admin
@@ -1596,14 +2046,44 @@ app.delete("/v1/integrations/google/disconnect", async (request, reply) => {
     .maybeSingle();
   if (!membership)
     return reply.code(403).send({ error: "Tenant access required" });
+  const workspace = await getWorkspaceForUser(workspaceId, request.user!.id);
+  if (!workspace || workspace.tenant_id !== tenantId)
+    return reply.code(403).send({ error: "Workspace access required" });
   const { error } = await admin
     .from("integrations")
     .delete()
-    .eq("tenant_id", tenantId)
+    .eq("workspace_id", workspaceId)
     .eq("provider", provider);
   if (error)
     return reply.code(503).send({ error: "Could not disconnect integration" });
   return { ok: true };
+});
+
+app.get("/v1/workspaces/:workspaceId/google-drive/folders", async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: "Workspace not found" });
+  const token = await getStoredToken(workspace.tenant_id, "drive", workspace.id);
+  if (!token) return reply.code(409).send({ error: "Google Drive is not connected" });
+  try {
+    return { folders: await listDriveFolders(token, (request.query as { search?: string }).search ?? "") };
+  } catch {
+    return reply.code(502).send({ error: "Could not load Google Drive folders" });
+  }
+});
+
+app.post("/v1/workspaces/:workspaceId/google-drive/folders", async (request, reply) => {
+  const workspace = await getWorkspaceForUser((request.params as { workspaceId: string }).workspaceId, request.user!.id);
+  if (!workspace) return reply.code(404).send({ error: "Workspace not found" });
+  const body = request.body as { name?: string; parent_id?: string };
+  if (!body.name?.trim()) return reply.code(400).send({ error: "Folder name is required" });
+  const token = await getStoredToken(workspace.tenant_id, "drive", workspace.id);
+  if (!token) return reply.code(409).send({ error: "Google Drive is not connected" });
+  try {
+    const folder = await createDriveFolder(token, body.name.trim(), body.parent_id);
+    return reply.code(201).send({ folder });
+  } catch {
+    return reply.code(502).send({ error: "Could not create Google Drive folder" });
+  }
 });
 app.get("/v1/integrations/google/callback", async (request, reply) => {
   const query = request.query as {
@@ -1628,6 +2108,7 @@ app.get("/v1/integrations/google/callback", async (request, reply) => {
   const { error } = await admin.from("integrations").upsert(
     {
       tenant_id: state.tenantId,
+      workspace_id: state.workspaceId,
       provider: state.provider,
       scopes: getProviderScopes(state.provider),
       account_email: account.email,
@@ -1644,7 +2125,7 @@ app.get("/v1/integrations/google/callback", async (request, reply) => {
       last_error: null,
       metadata: { accountLabel: account.label, accountType: account.type },
     },
-    { onConflict: "tenant_id,provider" },
+    { onConflict: "workspace_id,provider" },
   );
   if (error)
     return reply.redirect(

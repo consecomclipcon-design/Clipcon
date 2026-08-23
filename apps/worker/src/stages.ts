@@ -624,12 +624,19 @@ export async function handlePublishYoutube(supabase: SupabaseClient, job: Job) {
     job.source_video_id,
     { clipId, publicationId: savedPublicationId },
   );
-  const { error: vidErr } = await supabase
-    .from("source_videos")
-    .update({ status: "completed", updated_at: new Date().toISOString() })
-    .eq("id", job.source_video_id);
-  if (vidErr)
-    throw new Error("Could not mark source video completed: " + vidErr.message);
+  // Clip Studio clips não possuem source_video_id (candidates ficam null);
+  // só atualizamos o source video quando existir um UUID válido.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (job.source_video_id && UUID_RE.test(job.source_video_id)) {
+    const { error: vidErr } = await supabase
+      .from("source_videos")
+      .update({ status: "completed", updated_at: new Date().toISOString() })
+      .eq("id", job.source_video_id);
+    if (vidErr)
+      throw new Error(
+        "Could not mark source video completed: " + vidErr.message,
+      );
+  }
 }
 
 export async function handleSyncYoutubeMetrics(

@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useState, type FormEvent } from "react";
+import { StrictMode, useEffect, useRef, useState, type FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import type { Session } from "@supabase/supabase-js";
 import { createSupabaseClient } from "./lib/supabase";
@@ -6,11 +6,14 @@ import { loadPublicConfig } from "./config";
 import { EditorWorkspace } from "./EditorWorkspace";
 import { AiProvidersView } from "./AiProvidersView";
 import { BrandKitView } from "./BrandKitView";
+import { ReviewView } from "./ApprovalsView";
+import { ClipsWorkspaceView } from "./ClipsWorkspaceView";
 import "./styles.css";
 
 type Tenant = { id: string; name: string; slug: string; status: string };
 type Project = {
   id: string;
+  workspace_id?: string;
   name: string;
   description?: string | null;
   strategy?: string;
@@ -52,11 +55,45 @@ type Clip = {
     status: string;
   } | null;
 };
+type Notification = {
+  id: string;
+  title: string;
+  message: string;
+  read_at: string | null;
+  created_at: string;
+};
 type View =
-  "home" | "clips" | "performance" | "editor" | "settings" | "ai-providers";
+  | "home"
+  | "clips"
+  | "performance"
+  | "approvals"
+  | "editor"
+  | "settings"
+  | "ai-providers";
 
 let supabase: ReturnType<typeof createSupabaseClient> = null;
 let apiUrl = "";
+const projectCache = new Map<string, Project[]>();
+const projectRequests = new Map<string, Promise<Project[]>>();
+const clipCache = new Map<string, Clip[]>();
+const clipRequests = new Map<string, Promise<Clip[]>>();
+
+function readStored<T>(key: string, fallback: T): T {
+  try {
+    const value = window.localStorage.getItem(key);
+    return value ? (JSON.parse(value) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStored(key: string, value: unknown) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage may be unavailable in private browsing contexts.
+  }
+}
 
 function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -65,7 +102,13 @@ function App() {
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [clips, setClips] = useState<Clip[]>([]);
-  const [view, setView] = useState<View>("home");
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [toast, setToast] = useState<Notification | null>(null);
+  const notificationsLoaded = useRef(false);
+  const [view, setView] = useState<View>(() => readStored<View>("clipcon:view", "home"));
+  const [productTab, setProductTab] = useState<"clips" | "editor">(() => readStored<"clips" | "editor">("clipcon:product-tab", "clips"));
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState(() => readStored<string>("clipcon:active-workspace", ""));
+  const [reviewWorkspaces, setReviewWorkspaces] = useState<Array<{ id: string; name: string }>>([]);
   const [selectedClip, setSelectedClip] = useState<Clip | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -77,12 +120,19 @@ function App() {
   const [strategy, setStrategy] = useState("viral");
   const [mustChangePassword, setMustChangePassword] = useState(false);
   const [showProjectForm, setShowProjectForm] = useState(false);
+  const [showWorkspaceForm, setShowWorkspaceForm] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [googleStatus, setGoogleStatus] = useState<{
     drive: IntegrationStatus;
     youtube: IntegrationStatus;
   } | null>(null);
+  const sessionRef = useRef<Session | null>(null);
+  sessionRef.current = session;
+
+  useEffect(() => writeStored("clipcon:view", view), [view]);
+  useEffect(() => writeStored("clipcon:product-tab", productTab), [productTab]);
+  useEffect(() => writeStored("clipcon:active-workspace", activeWorkspaceId), [activeWorkspaceId]);
 
   useEffect(() => {
     if (!supabase) {
@@ -129,12 +179,18 @@ function App() {
     return () => {
       active = false;
     };
-  }, [session]);
+  }, [session?.user.id]);
   useEffect(() => {
     if (!supabase || !tenant) return;
     loadProjects();
-    loadIntegrations();
     loadClips();
+    loadNotifications();
+     authFetch("/v1/workspaces").then(async (response) => {
+       if (!response.ok) return;
+       const rows = ((await response.json()).workspaces ?? []) as Array<{ id: string }>;
+       if (rows.length && !rows.some((row) => row.id === activeWorkspaceId))
+         setActiveWorkspaceId(rows[0].id);
+     });
     const channel = supabase
       .channel(`tenant:${tenant.id}:jobs`)
       .on(
@@ -151,16 +207,44 @@ function App() {
         },
       )
       .subscribe();
+    const notificationChannel = supabase
+      .channel(`user:${session?.user.id}:notifications`)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "notifications", filter: `user_id=eq.${session?.user.id}` },
+        () => loadNotifications(),
+      )
+      .subscribe();
+    const timer = window.setInterval(loadNotifications, 10000);
     return () => {
       supabase?.removeChannel(channel);
+      supabase?.removeChannel(notificationChannel);
+      window.clearInterval(timer);
     };
   }, [tenant]);
+  useEffect(() => {
+    if (tenant && activeWorkspaceId) loadIntegrations();
+  }, [tenant, activeWorkspaceId]);
+  useEffect(() => {
+    if (!session) return;
+    authFetch("/v1/workspaces")
+      .then(async (response) => {
+        if (!response.ok) return;
+        const rows = ((await response.json()).workspaces ?? []) as Array<{ id: string; name: string }>;
+        setReviewWorkspaces(rows);
+        if (rows.length && !rows.some((row) => row.id === activeWorkspaceId))
+          setActiveWorkspaceId(rows[0].id);
+      })
+      .catch(() => {});
+  }, [session]);
 
   async function authFetch(path: string, init: RequestInit = {}) {
+    const currentSession = sessionRef.current;
+    if (!currentSession) throw new Error("Session is not available");
     return fetch(`${apiUrl}${path}`, {
       ...init,
       headers: {
-        Authorization: `Bearer ${session!.access_token}`,
+        Authorization: `Bearer ${currentSession.access_token}`,
         "Content-Type": "application/json",
         ...(init.headers ?? {}),
       },
@@ -168,22 +252,61 @@ function App() {
   }
   async function loadProjects() {
     if (!tenant) return;
-    const { data } = await supabase!
-      .from("projects")
-      .select("id, name, description, strategy, status, created_at")
-      .eq("tenant_id", tenant.id)
-      .order("created_at", { ascending: false });
-    setProjects(data ?? []);
+    const cached = projectCache.get(tenant.id);
+    if (cached) setProjects(cached);
+    let request = projectRequests.get(tenant.id);
+    if (!request) {
+      request = Promise.resolve(supabase!
+        .from("projects")
+        .select("id, workspace_id, name, description, strategy, status, created_at")
+        .eq("tenant_id", tenant.id)
+        .order("created_at", { ascending: false })
+        .then(({ data }) => (data ?? []) as Project[]));
+      projectRequests.set(tenant.id, request);
+    }
+    if (!request) return;
+    const rows = await request;
+    projectCache.set(tenant.id, rows);
+    projectRequests.delete(tenant.id);
+    setProjects(rows);
   }
   async function loadClips() {
     if (!tenant || !session) return;
-    const response = await authFetch(`/v1/clips?tenant_id=${tenant.id}`);
-    if (response.ok) setClips((await response.json()).clips ?? []);
+    const cached = clipCache.get(tenant.id);
+    if (cached) setClips(cached);
+    let request = clipRequests.get(tenant.id);
+    if (!request) {
+      request = authFetch(`/v1/clips?tenant_id=${tenant.id}`)
+        .then(async (response) => response.ok ? ((await response.json()).clips ?? []) as Clip[] : []);
+      clipRequests.set(tenant.id, request);
+    }
+    const rows = await request;
+    clipCache.set(tenant.id, rows);
+    clipRequests.delete(tenant.id);
+    setClips(rows);
+  }
+  async function loadNotifications() {
+    if (!session) return;
+    const response = await authFetch("/v1/notifications");
+    if (!response.ok) return;
+    const rows = ((await response.json()).notifications ?? []) as Notification[];
+    setNotifications((current) => {
+      if (notificationsLoaded.current) {
+        const fresh = rows.find((row) => !current.some((item) => item.id === row.id));
+        if (fresh) {
+          setToast(fresh);
+          window.setTimeout(() => setToast(null), 7000);
+        }
+      } else {
+        notificationsLoaded.current = true;
+      }
+      return rows;
+    });
   }
   async function loadIntegrations() {
-    if (!tenant || !session) return;
+    if (!tenant || !session || !activeWorkspaceId) return;
     const response = await authFetch(
-      `/v1/integrations/google/status?tenant_id=${tenant.id}`,
+      `/v1/integrations/google/status?tenant_id=${tenant.id}&workspace_id=${activeWorkspaceId}`,
     );
     if (response.ok) setGoogleStatus(await response.json());
   }
@@ -221,6 +344,27 @@ function App() {
       return setError(data.error ?? "Não foi possível criar o workspace.");
     setTenant(data.tenant);
   }
+  async function createNewWorkspace(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const response = await authFetch("/v1/workspaces", {
+      method: "POST",
+      body: JSON.stringify({
+        tenant_id: tenant!.id,
+        name: workspaceName,
+        slug: workspaceSlug,
+      }),
+    });
+    const data = await response.json();
+    setBusy(false);
+    if (!response.ok)
+      return setError(data.error ?? "Não foi possível criar o workspace.");
+    setWorkspaceName("");
+    setWorkspaceSlug("");
+    setShowWorkspaceForm(false);
+    setError(`Workspace "${data.workspace?.name ?? ""}" criado com sucesso.`);
+  }
   async function createProject(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -246,8 +390,9 @@ function App() {
     setView("clips");
   }
   async function connectIntegration(provider: "drive" | "youtube") {
+    if (!activeWorkspaceId) return;
     const response = await authFetch(
-      `/v1/integrations/google/start?tenant_id=${tenant!.id}&provider=${provider}`,
+      `/v1/integrations/google/start?tenant_id=${tenant!.id}&workspace_id=${activeWorkspaceId}&provider=${provider}`,
     );
     const data = await response.json();
     if (!response.ok)
@@ -255,8 +400,9 @@ function App() {
     window.location.href = data.url;
   }
   async function disconnectIntegration(provider: "drive" | "youtube") {
+    if (!activeWorkspaceId) return;
     await authFetch(
-      `/v1/integrations/google/disconnect?tenant_id=${tenant!.id}&provider=${provider}`,
+      `/v1/integrations/google/disconnect?tenant_id=${tenant!.id}&workspace_id=${activeWorkspaceId}&provider=${provider}`,
       { method: "DELETE" },
     );
     loadIntegrations();
@@ -303,7 +449,7 @@ function App() {
           </label>
           {error && <div className="error">{error}</div>}
           <button type="submit">
-            Entrar no workspace <span>↗</span>
+            Entrar no workspace <span>â†—</span>
           </button>
         </form>
       </main>
@@ -329,7 +475,7 @@ function App() {
           </label>
           {error && <div className="error">{error}</div>}
           <button type="submit">
-            Salvar nova senha <span>↗</span>
+            Salvar nova senha <span>â†—</span>
           </button>
         </form>
       </main>
@@ -364,7 +510,7 @@ function App() {
           </label>
           {error && <div className="error">{error}</div>}
           <button disabled={busy} type="submit">
-            Criar workspace <span>↗</span>
+            Criar workspace <span>â†—</span>
           </button>
         </form>
       </main>
@@ -376,75 +522,65 @@ function App() {
         <div className="brand">
           <b>CLIP</b>CON
         </div>
-        <div className="side-label">CLIPES</div>
-        <Nav
-          active={
-            view === "home"
-              ? "home"
-              : view === "clips"
-                ? "clips"
-                : view === "performance"
-                  ? "performance"
-                  : ""
-          }
-          onClick={setView}
-          icon="⌂"
-          label="Visão geral"
-          value="home"
-        />
-        <Nav
-          active={view}
-          onClick={setView}
-          icon="◈"
-          label="Biblioteca"
-          value="clips"
-        />
-        <Nav
-          active={view}
-          onClick={setView}
-          icon="↗"
-          label="Performance"
-          value="performance"
-        />
-        <div className="side-label editor-label">EDITOR</div>
-        <Nav
-          active={view}
-          onClick={setView}
-          icon="＋"
-          label="Novo projeto"
-          value="editor"
-        />
-        <Nav
-          active={view}
-          onClick={setView}
-          icon="▦"
-          label="Meus projetos"
-          value="editor"
-        />
+        <div className="product-tabs">
+          <button className={productTab === "clips" ? "active" : ""} onClick={() => { setProductTab("clips"); setView("home"); }}>
+            â—ˆ Clips
+          </button>
+          <button className={productTab === "editor" ? "active" : ""} onClick={() => { setProductTab("editor"); setView("editor"); }}>
+            âœ‚ Editor de vídeos
+          </button>
+        </div>
+        {productTab === "clips" ? (
+          <>
+            <div className="side-label">CLIPS</div>
+            <Nav active={view} onClick={setView} icon="âŒ‚" label="Workspace de clips" value="home" />
+            <Nav active={view} onClick={setView} icon="✔" label="Revisão" value="approvals" />
+            <Nav active={view} onClick={setView} icon="â†—" label="Performance" value="performance" />
+          </>
+        ) : (
+          <>
+            <div className="side-label">EDITOR DE VÍDEOS</div>
+            <Nav active={view} onClick={setView} icon="ï¼‹" label="Abrir editor" value="editor" />
+          </>
+        )}
         <div className="side-label system-label">SISTEMA</div>
-        <Nav
-          active={view}
-          onClick={setView}
-          icon="◎"
-          label="Integrações"
-          value="settings"
-        />
-        <Nav
-          active={view}
-          onClick={setView}
-          icon="◇"
-          label="AI Providers"
-          value="ai-providers"
-        />
+        <Nav active={view} onClick={setView} icon="â—Ž" label="Integrações" value="settings" />
+        <Nav active={view} onClick={setView} icon="â—‡" label="AI Providers" value="ai-providers" />
         <div className="sidebar-bottom">
           <span className="workspace-dot" />
           {tenant.name}
+          <button
+            className="logout"
+            onClick={() => setShowWorkspaceForm((value) => !value)}
+            title="Criar novo workspace"
+          >
+            ï¼‹ Nova
+          </button>
           <button className="logout" onClick={signOut}>
             Sair
           </button>
         </div>
+        {showWorkspaceForm && (
+          <form className="mini-workspace-form" onSubmit={createNewWorkspace}>
+            <input
+              value={workspaceName}
+              onChange={(event) => setWorkspaceName(event.target.value)}
+              placeholder="Nome do workspace"
+            />
+            <input
+              value={workspaceSlug}
+              onChange={(event) => setWorkspaceSlug(event.target.value)}
+              placeholder="slug"
+            />
+            <button type="submit" disabled={busy}>
+              {busy ? "..." : "Criar workspace"}
+            </button>
+            {error && <small className="muted">{error}</small>}
+          </form>
+        )}
       </aside>
       <main className="workspace">
+        {toast && <div className="global-toast"><strong>{toast.title}</strong><span>{toast.message}</span></div>}
         <header className="topbar">
           <div>
             <span className="eyebrow">
@@ -453,11 +589,13 @@ function App() {
             <h3>
               {view === "home"
                 ? "Visão geral"
-                : view === "clips"
-                  ? "Biblioteca de clipes"
-                  : view === "performance"
-                    ? "Performance"
-                    : view === "editor"
+                      : view === "clips"
+                        ? "Clips"
+: view === "performance"
+                      ? "Performance"
+                      : view === "approvals"
+                        ? "Revisão de publicações"
+                        : view === "editor"
                       ? "Editor de vídeo"
                       : view === "ai-providers"
                         ? "AI Providers"
@@ -471,47 +609,37 @@ function App() {
             </div>
           </div>
         </header>
-        {view === "home" && (
-          <Home
+        <div className={productTab === "clips" && (view === "home" || view === "clips") ? "" : "page-hidden"}>
+          <ClipsWorkspaceView
+            tenantId={tenant.id}
             projects={projects}
-            clips={clips}
-            onCreate={() => setShowProjectForm(true)}
-            onNavigate={setView}
-            onSelect={setSelectedClip}
+            authFetch={authFetch}
+            onWorkspaceChanged={setActiveWorkspaceId}
+            googleStatus={googleStatus}
+            onConnect={connectIntegration}
+            onDisconnect={disconnectIntegration}
+            onProjectsChanged={loadProjects}
           />
-        )}
-        {view === "clips" && (
-          <ClipsView
-            clips={clips}
-            onSelect={setSelectedClip}
-            onCreate={() => setShowProjectForm(true)}
-          />
-        )}
-        {view === "performance" && (
+        </div>
+        <div className={view === "performance" ? "" : "page-hidden"}>
           <PerformanceView tenantId={tenant.id} authFetch={authFetch} />
-        )}
-        {view === "editor" &&
-          (projects[0] ? (
-            <EditorWorkspace
-              projectId={projects[0].id}
-              projectName={projects[0].name}
-              authFetch={authFetch}
-              onExit={() => setView("home")}
-            />
-          ) : (
-            <EditorView projects={projects} />
-          ))}
-        {view === "settings" && (
-          <>
-            <Settings
-              googleStatus={googleStatus}
-              onConnect={connectIntegration}
-              onDisconnect={disconnectIntegration}
-            />
-            <BrandKitView authFetch={authFetch} />
-          </>
-        )}
-        {view === "ai-providers" && <AiProvidersView authFetch={authFetch} />}
+        </div>
+        <div className={view === "approvals" ? "" : "page-hidden"}>
+          <ReviewView authFetch={authFetch} workspaces={reviewWorkspaces} activeWorkspaceId={activeWorkspaceId} onWorkspaceChanged={setActiveWorkspaceId} />
+        </div>
+        <div className={productTab === "editor" && view === "editor" ? "" : "page-hidden"}>
+          <EditorView projects={projects} authFetch={authFetch} />
+        </div>
+        <div className={view === "settings" ? "" : "page-hidden"}>
+          <Settings
+            googleStatus={googleStatus}
+            onConnect={connectIntegration}
+            onDisconnect={disconnectIntegration}
+          />
+        </div>
+        <div className={view === "ai-providers" ? "" : "page-hidden"}>
+          <AiProvidersView authFetch={authFetch} />
+        </div>
         {showProjectForm && (
           <ProjectModal
             busy={busy}
@@ -585,27 +713,27 @@ function Home({
           <p>Escolha um ambiente e leve seu conteúdo para o próximo nível.</p>
         </div>
         <button onClick={onCreate}>
-          Novo projeto <span>＋</span>
+          Novo projeto <span>ï¼‹</span>
         </button>
       </div>
       <div className="choice-grid">
         <button className="choice-card primary" onClick={onCreate}>
-          <span className="choice-icon">◈</span>
+          <span className="choice-icon">â—ˆ</span>
           <strong>Criar Clipes</strong>
           <p>
             Transforme vídeos longos em Shorts com análise, seleção e publicação
             assistidas por IA.
           </p>
-          <span className="choice-link">Começar agora ↗</span>
+          <span className="choice-link">Começar agora â†—</span>
         </button>
         <button className="choice-card" onClick={() => onNavigate("editor")}>
-          <span className="choice-icon">✂</span>
+          <span className="choice-icon">âœ‚</span>
           <strong>Editar Vídeo</strong>
           <p>
             Organize uma edição manual ou prepare o material para receber ajuda
             da IA.
           </p>
-          <span className="choice-link">Abrir editor ↗</span>
+          <span className="choice-link">Abrir editor â†—</span>
         </button>
       </div>
       <div className="stats-row">
@@ -629,7 +757,7 @@ function Home({
             <h2>Seus últimos clipes</h2>
           </div>
           <button className="text-button" onClick={() => onNavigate("clips")}>
-            Ver biblioteca ↗
+            Ver biblioteca â†—
           </button>
         </div>
         {clips.length ? (
@@ -650,7 +778,7 @@ function Home({
               momentos que merecem continuar.
             </p>
             <button onClick={onCreate}>
-              Adicionar fonte <span>＋</span>
+              Adicionar fonte <span>ï¼‹</span>
             </button>
           </div>
         )}
@@ -686,7 +814,7 @@ function ClipsView({
           </p>
         </div>
         <button onClick={onCreate}>
-          Novo projeto <span>＋</span>
+          Novo projeto <span>ï¼‹</span>
         </button>
       </div>
       <div className="toolbar">
@@ -714,7 +842,7 @@ function ClipsView({
           <strong>Nenhum clipe gerado ainda.</strong>
           <p>Crie um projeto para iniciar o pipeline.</p>
           <button onClick={onCreate}>
-            Criar projeto <span>＋</span>
+            Criar projeto <span>ï¼‹</span>
           </button>
         </div>
       )}
@@ -745,7 +873,7 @@ function ClipCard({ clip, onClick }: { clip: Clip; onClick: () => void }) {
         <small>{clip.candidate?.category ?? "Análise ClipCon"}</small>
         <div className="clip-meta">
           <span>
-            ◉ {Number(clip.performance?.views ?? 0).toLocaleString("pt-BR")}
+            â—‰ {Number(clip.performance?.views ?? 0).toLocaleString("pt-BR")}
           </span>
           <span>
             Score{" "}
@@ -787,17 +915,17 @@ function PerformanceView({
       <div className="stats-row performance-stats">
         <Stat
           label="Views totais"
-          value={m?.totalViews?.toLocaleString("pt-BR") ?? "—"}
+          value={m?.totalViews?.toLocaleString("pt-BR") ?? "â€”"}
         />
         <Stat
           label="Inscritos gerados"
-          value={m?.subscribersGained?.toLocaleString("pt-BR") ?? "—"}
+          value={m?.subscribersGained?.toLocaleString("pt-BR") ?? "â€”"}
         />
         <Stat
           label="Score médio"
-          value={m?.averageScore ? Math.round(m.averageScore) : "—"}
+          value={m?.averageScore ? Math.round(m.averageScore) : "â€”"}
         />
-        <Stat label="Publicados" value={m?.published ?? "—"} />
+        <Stat label="Publicados" value={m?.published ?? "â€”"} />
       </div>
       <div className="insight-layout">
         <div className="card insight-card">
@@ -825,7 +953,7 @@ function PerformanceView({
           )}
         </div>
         <div className="card explain-card">
-          <span className="eyebrow">MÉTODO</span>
+          <span className="eyebrow">MÃ‰TODO</span>
           <h2>Não é só view.</h2>
           <p>
             O score futuro combina retenção, engagement, conversão em inscritos
@@ -837,7 +965,39 @@ function PerformanceView({
     </section>
   );
 }
-function EditorView({ projects }: { projects: Project[] }) {
+function EditorView({
+  projects,
+  authFetch,
+}: {
+  projects: Project[];
+  authFetch: (path: string, init?: RequestInit) => Promise<Response>;
+}) {
+  const [projectId, setProjectId] = useState(() => {
+    try {
+      return window.localStorage.getItem("clipcon:editor-project") ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const project = projects.find((item) => item.id === projectId);
+  useEffect(() => {
+    try {
+      if (projectId) window.localStorage.setItem("clipcon:editor-project", projectId);
+      else window.localStorage.removeItem("clipcon:editor-project");
+    } catch {
+      // Storage is optional; the server remains the source of truth.
+    }
+  }, [projectId]);
+  if (project) {
+    return (
+      <EditorWorkspace
+        projectId={project.id}
+        projectName={project.name}
+        authFetch={authFetch}
+        onExit={() => setProjectId("")}
+      />
+    );
+  }
   return (
     <section className="page editor-page">
       <div className="page-intro">
@@ -849,30 +1009,28 @@ function EditorView({ projects }: { projects: Project[] }) {
             assistida por IA.
           </p>
         </div>
-        <button disabled title="Edição manual avançada ainda não disponível">
-          Importar mídia <span>＋</span>
-        </button>
+        <span className="editor-separation-note">Edição manual independente dos Clips</span>
       </div>
       <div className="editor-frame card">
         <aside className="editor-tools">
           <strong>Ferramentas</strong>
-          <span>◫ Mídia</span>
+          <span>â—« Mídia</span>
           <span>
-            ✂ Cortar <em>em breve</em>
+            âœ‚ Cortar <em>em breve</em>
           </span>
           <span>
             T Texto <em>em breve</em>
           </span>
           <span>
-            ♬ Áudio <em>em breve</em>
+            â™¬ Áudio <em>em breve</em>
           </span>
           <span>
-            ✦ IA <em>em breve</em>
+            âœ¦ IA <em>em breve</em>
           </span>
         </aside>
         <div className="editor-canvas">
           <div className="canvas-empty">
-            <span>◌</span>
+            <span>â—Œ</span>
             <strong>Selecione uma mídia para começar</strong>
             <p>
               Preview e timeline serão habilitados quando o projeto de edição
@@ -895,9 +1053,9 @@ function EditorView({ projects }: { projects: Project[] }) {
         <span className="eyebrow">PROJETOS DISPONÍVEIS</span>
         {projects.length ? (
           projects.map((project) => (
-            <span className="project-pill" key={project.id}>
-              {project.name}
-            </span>
+            <button className="project-pill" key={project.id} onClick={() => setProjectId(project.id)}>
+              Abrir {project.name}
+            </button>
           ))
         ) : (
           <span className="muted">Nenhum projeto criado.</span>
@@ -933,7 +1091,7 @@ function Settings({
           return (
             <div className="integration-card card" key={provider}>
               <span className="integration-symbol">
-                {provider === "drive" ? "▤" : "▶"}
+                {provider === "drive" ? "â–¤" : "â–¶"}
               </span>
               <div>
                 <span className="eyebrow">
@@ -951,7 +1109,7 @@ function Settings({
                   connected ? onDisconnect(provider) : onConnect(provider)
                 }
               >
-                {connected ? "Desconectar" : "Conectar"} <span>↗</span>
+                {connected ? "Desconectar" : "Conectar"} <span>â†—</span>
               </button>
             </div>
           );
@@ -992,7 +1150,7 @@ function ProjectModal({
             <h2>Começar com uma fonte</h2>
           </div>
           <button type="button" className="icon-button" onClick={onClose}>
-            ×
+            Ã—
           </button>
         </div>
         <label>
@@ -1037,7 +1195,7 @@ function ProjectModal({
         </p>
         {error && <div className="error">{error}</div>}
         <button disabled={busy} type="submit">
-          {busy ? "Enfileirando..." : "Enfileirar processamento"} <span>↗</span>
+          {busy ? "Enfileirando..." : "Enfileirar processamento"} <span>â†—</span>
         </button>
       </form>
     </div>
@@ -1086,14 +1244,14 @@ function ClipPanel({
     <div className="modal-backdrop">
       <section className="clip-panel">
         <button className="close-panel" onClick={onClose}>
-          ×
+          Ã—
         </button>
         <div className="preview-placeholder">
           {videoUrl ? (
             <video controls autoPlay src={videoUrl} />
           ) : (
             <>
-              <span>▶</span>
+              <span>â–¶</span>
               <p>Preview do clipe</p>
               <small>
                 O preview aparece quando o arquivo estiver no Drive.
@@ -1110,14 +1268,14 @@ function ClipPanel({
                 ? `${Math.round(clip.duration_seconds)}s`
                 : "Duração pendente"}
             </span>
-            <span>Score {clip.candidate?.score ?? "—"}</span>
+            <span>Score {clip.candidate?.score ?? "â€”"}</span>
             <span>{clip.status}</span>
           </div>
           <p className="hook">
-            “
+            â€œ
             {clip.candidate?.hook ??
               "Hook registrado pela análise aparecerá aqui."}
-            ”
+            ⬝
           </p>
           <div className="feedback-box">
             <strong>O que você achou?</strong>
@@ -1126,13 +1284,13 @@ function ClipPanel({
                 className={rating === 1 ? "selected" : ""}
                 onClick={() => setRating(1)}
               >
-                👍 Gostei
+                ðŸ‘ Gostei
               </button>
               <button
                 className={rating === -1 ? "selected negative" : ""}
                 onClick={() => setRating(-1)}
               >
-                👎 Não gostei
+                ðŸ‘Ž Não gostei
               </button>
             </div>
             <textarea
@@ -1141,7 +1299,7 @@ function ClipPanel({
               placeholder="O começo ficou lento? O conflito funcionou? Diga à IA o que aprender."
             />
             <button disabled={!rating} onClick={save}>
-              {saved ? "Feedback salvo" : "Salvar feedback"} <span>↗</span>
+              {saved ? "Feedback salvo" : "Salvar feedback"} <span>â†—</span>
             </button>
           </div>
         </div>
@@ -1179,3 +1337,4 @@ async function bootstrap() {
   }
 }
 bootstrap();
+

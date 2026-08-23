@@ -24,14 +24,16 @@ export async function getAccessToken(
   supabase: SupabaseClient,
   tenantId: string,
   provider: GoogleProvider,
+  workspaceId?: string,
 ) {
   requireAppSecret();
-  const { data } = await supabase
+  let query = supabase
     .from("integrations")
     .select("encrypted_access_token, encrypted_refresh_token, token_expires_at")
     .eq("tenant_id", tenantId)
-    .eq("provider", provider)
-    .maybeSingle();
+    .eq("provider", provider);
+  if (workspaceId) query = query.eq("workspace_id", workspaceId);
+  const { data } = await query.maybeSingle();
   if (!data?.encrypted_access_token)
     throw new Error(`No ${provider} integration connected for tenant`);
   const accessToken = decryptToken(data.encrypted_access_token);
@@ -55,7 +57,8 @@ export async function getAccessToken(
         updated_at: new Date().toISOString(),
       })
       .eq("tenant_id", tenantId)
-      .eq("provider", provider);
+      .eq("provider", provider)
+      .match(workspaceId ? { workspace_id: workspaceId } : {});
     return fresh.access_token;
   }
   return accessToken;
@@ -125,29 +128,58 @@ export async function uploadFileToDrive(
   mimeType: string,
   data: Buffer,
   folderId?: string,
+  workspaceId?: string,
 ) {
   const metadata = {
     name: fileName,
     mimeType,
     ...(folderId ? { parents: [folderId] } : {}),
   };
-  const url =
-    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink";
-  let token = await getAccessToken(supabase, tenantId, "drive");
-  try {
-    return (await uploadMultipart(url, token, metadata, mimeType, data)) as {
+  // Resumable upload per Google Drive docs (recommended for files > 5 MB):
+  // https://developers.google.com/workspace/drive/api/guides/manage-uploads
+  let token = await getAccessToken(supabase, tenantId, "drive", workspaceId);
+  async function run(t: string) {
+    const init = await fetch(
+      "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink,size",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${t}`,
+          "Content-Type": "application/json; charset=UTF-8",
+          "X-Upload-Content-Type": mimeType,
+          "X-Upload-Content-Length": String(data.length),
+        },
+        body: JSON.stringify(metadata),
+      },
+    );
+    if (!init.ok)
+      throw new Error(
+        `Drive resumable init failed: ${init.status} ${await init.text()}`,
+      );
+    const sessionUrl = init.headers.get("location");
+    if (!sessionUrl) throw new Error("Drive resumable session missing Location");
+    const put = await fetch(sessionUrl, {
+      method: "PUT",
+      headers: { "Content-Length": String(data.length) },
+      body: new Uint8Array(data),
+    });
+    if (!put.ok)
+      throw new Error(
+        `Drive resumable upload failed: ${put.status} ${await put.text()}`,
+      );
+    return (await put.json()) as {
       id: string;
       name: string;
       webViewLink?: string;
+      size?: string;
     };
+  }
+  try {
+    return await run(token);
   } catch (err) {
     if (isUnauthorized(err instanceof Error ? err.message : String(err))) {
-      token = await getAccessToken(supabase, tenantId, "drive");
-      return (await uploadMultipart(url, token, metadata, mimeType, data)) as {
-        id: string;
-        name: string;
-        webViewLink?: string;
-      };
+      token = await getAccessToken(supabase, tenantId, "drive", workspaceId);
+      return await run(token);
     }
     throw err;
   }
@@ -159,28 +191,53 @@ export async function uploadVideoToYouTube(
   title: string,
   description: string,
   data: Buffer,
+  workspaceId?: string,
 ) {
   const metadata = {
     snippet: { title, description, categoryId: "22" },
     status: { privacyStatus: "public" },
   };
-  const url =
-    "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status";
-  let token = await getAccessToken(supabase, tenantId, "youtube");
+  // Resumable upload — exigido pela YouTube Data API para vídeos.
+  // https://developers.google.com/youtube/v3/guides/using_resumable_upload_protocol
+  let token = await getAccessToken(supabase, tenantId, "youtube", workspaceId);
+  async function run(t: string) {
+    const init = await fetch(
+      "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${t}`,
+          "Content-Type": "application/json; charset=UTF-8",
+          "X-Upload-Content-Type": "video/mp4",
+          "X-Upload-Content-Length": String(data.length),
+        },
+        body: JSON.stringify(metadata),
+      },
+    );
+    if (!init.ok)
+      throw new Error(
+        `YouTube resumable init failed: ${init.status} ${await init.text()}`,
+      );
+    const sessionUrl = init.headers.get("location");
+    if (!sessionUrl)
+      throw new Error("YouTube resumable session missing Location");
+    const put = await fetch(sessionUrl, {
+      method: "PUT",
+      headers: { "Content-Length": String(data.length) },
+      body: new Uint8Array(data),
+    });
+    if (!put.ok)
+      throw new Error(
+        `YouTube resumable upload failed: ${put.status} ${await put.text()}`,
+      );
+    return (await put.json()) as { id: string };
+  }
   try {
-    return (await uploadMultipart(url, token, metadata, "video/mp4", data)) as {
-      id: string;
-    };
+    return await run(token);
   } catch (err) {
     if (isUnauthorized(err instanceof Error ? err.message : String(err))) {
-      token = await getAccessToken(supabase, tenantId, "youtube");
-      return (await uploadMultipart(
-        url,
-        token,
-        metadata,
-        "video/mp4",
-        data,
-      )) as { id: string };
+      token = await getAccessToken(supabase, tenantId, "youtube", workspaceId);
+      return await run(token);
     }
     throw err;
   }
@@ -190,8 +247,9 @@ export async function fetchYoutubeVideoMetrics(
   supabase: SupabaseClient,
   tenantId: string,
   videoId: string,
+  workspaceId?: string,
 ) {
-  const token = await getAccessToken(supabase, tenantId, "youtube");
+  const token = await getAccessToken(supabase, tenantId, "youtube", workspaceId);
   const response = await fetch(
     `https://www.googleapis.com/youtube/v3/videos?part=statistics,contentDetails,snippet,status&id=${encodeURIComponent(videoId)}`,
     { headers: { Authorization: `Bearer ${token}` } },
