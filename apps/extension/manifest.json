@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClipCon Ingest",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Envie vídeos do YouTube direto para o ClipCon a partir do seu navegador.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "offscreen", "webRequest"],

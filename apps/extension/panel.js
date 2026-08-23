@@ -105,6 +105,9 @@
       root = null;
     }
   }
+  function isOpen() {
+    return !!host;
+  }
 
   function render() {
     if (!host) return;
