@@ -679,7 +679,7 @@ function App() {
           <PerformanceView tenantId={tenant.id} authFetch={authFetch} />
         </div>
         <div className={view === "approvals" ? "" : "page-hidden"}>
-          <ReviewView authFetch={authFetch} workspaces={reviewWorkspaces} activeWorkspaceId={activeWorkspaceId} onWorkspaceChanged={setActiveWorkspaceId} />
+          <ReviewView authFetch={authFetch} workspaces={reviewWorkspaces} activeWorkspaceId={activeWorkspaceId} onWorkspaceChanged={setActiveWorkspaceId} tenantId={tenant.id} />
         </div>
         <div className={productTab === "editor" && view === "editor" ? "" : "page-hidden"}>
           <EditorView projects={projects} authFetch={authFetch} />

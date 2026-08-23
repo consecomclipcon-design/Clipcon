@@ -1,4 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ProductionQueue } from "./ProductionQueue";
 
 type ApiFetch = (path: string, init?: RequestInit) => Promise<Response>;
 type Workspace = { id: string; name: string };
@@ -39,9 +40,10 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "Rejeitado",
 };
 
-type FilterKey = "all" | "scheduled" | "published" | "cancelled" | "failed";
+type FilterKey = "all" | "creating" | "scheduled" | "published" | "cancelled" | "failed";
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: "all", label: "Todos" },
+  { key: "creating", label: "Criando" },
   { key: "scheduled", label: "Pendentes" },
   { key: "published", label: "Aprovados" },
   { key: "cancelled", label: "Rejeitados" },
@@ -63,11 +65,13 @@ export function ReviewView({
   workspaces,
   activeWorkspaceId,
   onWorkspaceChanged,
+  tenantId,
 }: {
   authFetch: ApiFetch;
   workspaces: Workspace[];
   activeWorkspaceId: string;
   onWorkspaceChanged: (id: string) => void;
+  tenantId: string;
 }) {
   const [publications, setPublications] = useState<Publication[]>([]);
   const [loading, setLoading] = useState(true);
@@ -207,28 +211,39 @@ export function ReviewView({
 
       {status && <div className="form-note">{status}</div>}
       {error && <div className="form-note error-text">{error}</div>}
-      {loading && <p className="muted">Carregando publicações…</p>}
-      {!loading && !visible.length && (
-        <p className="muted">
-          Nenhuma publicação neste filtro. Rode o Clip Studio no modo “por
-          aprovação” para gerar clipes para revisão.
-        </p>
-      )}
 
-      <div className="review-list">
-        {visible.map((publication) => (
-          <ReviewCard
-            key={publication.id}
-            publication={publication}
-            busy={busyId === publication.id}
-            favorite={favorites.has(publication.id)}
-            onApprove={() => act(publication.id, "approve")}
-            onReject={() => act(publication.id, "reject")}
-            onFavorite={() => toggleFavorite(publication.id)}
-            onZoom={() => setZoomed(publication)}
-          />
-        ))}
-      </div>
+      {filter === "creating" ? (
+        <ProductionQueue
+          authFetch={authFetch}
+          workspaceId={activeWorkspaceId}
+          tenantId={tenantId}
+        />
+      ) : (
+        <>
+          {loading && <p className="muted">Carregando publicações…</p>}
+          {!loading && !visible.length && (
+            <p className="muted">
+              Nenhuma publicação neste filtro. Rode o Clip Studio no modo “por
+              aprovação” para gerar clipes para revisão.
+            </p>
+          )}
+
+          <div className="review-list">
+            {visible.map((publication) => (
+              <ReviewCard
+                key={publication.id}
+                publication={publication}
+                busy={busyId === publication.id}
+                favorite={favorites.has(publication.id)}
+                onApprove={() => act(publication.id, "approve")}
+                onReject={() => act(publication.id, "reject")}
+                onFavorite={() => toggleFavorite(publication.id)}
+                onZoom={() => setZoomed(publication)}
+              />
+            ))}
+          </div>
+        </>
+      )}
 
       {zoomed && (
         <div
