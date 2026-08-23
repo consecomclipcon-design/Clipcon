@@ -14,7 +14,7 @@ New-Item -ItemType Directory -Force $out | Out-Null
 # staging sem arquivos sensíveis
 $staging = Join-Path $env:TEMP ("clipcon-ext-" + [guid]::NewGuid().ToString("N").Substring(0,8))
 New-Item -ItemType Directory -Force $staging | Out-Null
-Get-ChildItem -Path $ext -Exclude "preauth.js" | Copy-Item -Destination $staging -Recurse -Force
+Get-ChildItem -Path $ext -Exclude "preauth.json", "preauth.json.example" | Copy-Item -Destination $staging -Recurse -Force
 
 $zip = Join-Path $out "clipcon-extension-v$version.zip"
 if (Test-Path $zip) { Remove-Item $zip }

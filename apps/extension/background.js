@@ -9,11 +9,24 @@ const POLL_MAX_MS = 10 * 60 * 1000;
 // Ãšnico ponto de configuraÃ§Ã£o: URL da API de produÃ§Ã£o do ClipCon.
 const DEFAULT_API_URL = "https://clipcon-api-production.up.railway.app";
 
-// Pre-auth opcional (arquivo local preauth.js - nunca versionado nem distribuido)
-try {
-  importScripts("preauth.js");
-} catch (_) {}
-const PREAUTH = typeof self.CLIPCON_PREAUTH !== "undefined" ? self.CLIPCON_PREAUTH : null;
+// Pre-auth opcional (arquivo local preauth.json - nunca versionado nem distribuido).
+// Lido via fetch para NAO quebrar o registro do service worker quando ausente.
+let _preAuthCache;
+async function getPreAuth() {
+  if (_preAuthCache !== undefined) return _preAuthCache;
+  try {
+    const res = await fetch(chrome.runtime.getURL("preauth.json"));
+    if (!res.ok) {
+      _preAuthCache = null;
+      return null;
+    }
+    const j = await res.json();
+    _preAuthCache = j && j.email ? j : null;
+  } catch (_) {
+    _preAuthCache = null;
+  }
+  return _preAuthCache;
+}
 
 /* ---------------- util ---------------- */
 function hexToAscii(hex) {
@@ -144,10 +157,13 @@ async function getAuth() {
     return null;
   }
   let { session } = await chrome.storage.local.get("session");
-  if (!session && PREAUTH && PREAUTH.email && PREAUTH.password) {
-    // Extensão "já vem conectada": login silencioso uma única vez
-    await loginWithPassword(PREAUTH.email, PREAUTH.password);
-    session = (await chrome.storage.local.get("session")).session;
+  if (!session) {
+    const PREAUTH = await getPreAuth();
+    if (PREAUTH && PREAUTH.password) {
+      // Extensão "já vem conectada": login silencioso uma única vez
+      await loginWithPassword(PREAUTH.email, PREAUTH.password);
+      session = (await chrome.storage.local.get("session")).session;
+    }
   }
   if (!session) return null;
   if (session.expires_at && Date.now() < session.expires_at - 60_000) {
