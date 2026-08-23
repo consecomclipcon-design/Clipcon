@@ -58,11 +58,25 @@
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       const payload = await requestPlayerResponse(2000);
+      const vid = getVideoId();
+      const video = payload
+        ? {
+            id: payload.videoId || vid,
+            title: payload.title,
+            author: payload.author,
+            durationSeconds: payload.lengthSeconds,
+          }
+        : { id: vid, title: document.title.replace(/ - YouTube$/, ""), durationSeconds: 0 };
+      if (window.__clipconPanel) {
+        window.__clipconPanel.setVideo(video);
+        window.__clipconPanel.setFormats(payload ? payload.progressiveFormats : []);
+        window.__clipconPanel.open(video);
+      }
       chrome.runtime.sendMessage(
         {
           type: "OPEN_FOR_VIDEO",
           tabUrl: location.href,
-          payload: payload ? { ...payload, videoId: payload.videoId || getVideoId() } : null,
+          payload: payload ? { ...payload, videoId: payload.videoId || vid } : null,
         },
         () => void chrome.runtime.lastError
       );

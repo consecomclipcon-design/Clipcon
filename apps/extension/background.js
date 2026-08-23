@@ -1,10 +1,13 @@
 /* Service worker: estado global, captura alternativa (webRequest), auth,
-   polling do asset e disparo automático do Clip Studio. */
+   polling do asset e disparo automÃ¡tico do Clip Studio. */
 "use strict";
 
-const SAFE_MAX_BYTES = 420 * 1024 * 1024; // guarda pré-flight vs bodyLimit da API
+const SAFE_MAX_BYTES = 420 * 1024 * 1024; // guarda prÃ©-flight vs bodyLimit da API
 const POLL_INTERVAL_MS = 5000;
 const POLL_MAX_MS = 10 * 60 * 1000;
+
+// Ãšnico ponto de configuraÃ§Ã£o: URL da API de produÃ§Ã£o do ClipCon.
+const DEFAULT_API_URL = "https://CLIPCON-API.up.railway.app"; // TODO: substituir pela URL real
 
 /* ---------------- util ---------------- */
 function hexToAscii(hex) {
@@ -98,10 +101,44 @@ async function ensureOffscreen() {
   await creatingOffscreen;
 }
 
-/* ---------------- auth ---------------- */
+/* ---------------- config + auth ---------------- */
+let _cfgPromise = null;
+async function getConfig() {
+  if (!_cfgPromise) {
+    _cfgPromise = (async () => {
+      const { config } = await chrome.storage.local.get("config");
+      if (config && config.fetchedAt && Date.now() - config.fetchedAt < 24 * 3600_000) return config;
+      const res = await fetch(`${DEFAULT_API_URL}/config.js`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`config HTTP ${res.status}`);
+      const text = await res.text();
+      const m = /window\.__CLIPCON_CONFIG__\s*=\s*(\{.*\});?\s*$/s.exec(text);
+      if (!m) throw new Error("config invÃ¡lida");
+      const cfg = JSON.parse(m[1]);
+      const next = {
+        supabaseUrl: cfg.supabaseUrl,
+        publishableKey: cfg.publishableKey,
+        apiUrl: cfg.apiUrl || DEFAULT_API_URL,
+        fetchedAt: Date.now(),
+      };
+      await chrome.storage.local.set({ config: next });
+      return next;
+    })().catch((e) => {
+      _cfgPromise = null;
+      throw e;
+    });
+  }
+  return _cfgPromise;
+}
+
 async function getAuth() {
-  const { config, session } = await chrome.storage.local.get(["config", "session"]);
-  if (!config || !session) return null;
+  let config;
+  try {
+    config = await getConfig();
+  } catch (_) {
+    return null;
+  }
+  const { session } = await chrome.storage.local.get("session");
+  if (!session) return null;
   if (session.expires_at && Date.now() < session.expires_at - 60_000) {
     return { token: session.access_token, session, config };
   }
@@ -134,7 +171,51 @@ async function getAuth() {
   }
 }
 
+async function loginWithPassword(email, password) {
+  let config;
+  try {
+    config = await getConfig();
+  } catch (e) {
+    return { ok: false, error: "API indisponÃ­vel: " + e.message };
+  }
+  try {
+    const res = await fetch(`${config.supabaseUrl}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: {
+        apikey: config.publishableKey,
+        Authorization: `Bearer ${config.publishableKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) {
+      const msg = res.status === 400 ? "Credenciais invÃ¡lidas" : `Erro ${res.status}`;
+      return { ok: false, error: msg };
+    }
+    const d = await res.json();
+    await chrome.storage.local.set({
+      session: {
+        access_token: d.access_token,
+        refresh_token: d.refresh_token,
+        expires_in: d.expires_in,
+        expires_at: Date.now() + (d.expires_in || 3600) * 1000,
+        user_id: d.user ? d.user.id : null,
+        email: d.user ? d.user.email : email,
+      },
+    });
+    _cfgPromise = null; // forÃ§a revalidaÃ§Ã£o futura normal
+    return { ok: true, email: d.user ? d.user.email : email };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 /* ---------------- fluxo principal ---------------- */
+function notifyTab(tabId, video) {
+  if (tabId == null) return;
+  chrome.tabs.sendMessage(tabId, { type: "OPEN_PANEL", video: video || null }).catch(() => {});
+}
+
 function resolveFormats(videoId, progressiveFormats) {
   let formats = Array.isArray(progressiveFormats) ? progressiveFormats : [];
   let source = formats.length ? "player-response" : null;
@@ -160,19 +241,19 @@ async function startFlow(payload, senderTabId) {
   if (!auth) {
     await setState({
       phase: "NEED_LOGIN",
-      error: { message: "Conecte-se em Configurações antes de enviar vídeos." },
+      error: { message: "Conecte-se em ConfiguraÃ§Ãµes antes de enviar vÃ­deos." },
     });
-    try { await chrome.action.openPopup(); } catch (_) {}
+    notifyTab(tabId, payload && { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds })
     return;
   }
 
   const existing = await getState();
   if (existing && ["DOWNLOADING", "UPLOADING", "PROCESSING", "TRIGGERING"].includes(existing.phase)) {
-    try { await chrome.action.openPopup(); } catch (_) {}
+    notifyTab(tabId, payload && { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds })
     return;
   }
 
-  // Estratégia A (player response) → B (webRequest cache)
+  // EstratÃ©gia A (player response) â†’ B (webRequest cache)
   const videoId = payload && payload.videoId;
   const resolved = resolveFormats(videoId, payload && payload.progressiveFormats);
   const formats = resolved.formats;
@@ -184,14 +265,14 @@ async function startFlow(payload, senderTabId) {
       video: payload ? { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds } : null,
       error: {
         message:
-          "Não foi possível capturar um formato compatível (720p/360p progressivo). Dê play no vídeo por ~5 segundos e tente novamente. Se persistir, este vídeo não expõe formato capturável.",
+          "NÃ£o foi possÃ­vel capturar um formato compatÃ­vel (720p/360p progressivo). DÃª play no vÃ­deo por ~5 segundos e tente novamente. Se persistir, este vÃ­deo nÃ£o expÃµe formato capturÃ¡vel.",
       },
     });
-    try { await chrome.action.openPopup(); } catch (_) {}
+    notifyTab(tabId, payload && { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds })
     return;
   }
 
-  // ordena preferência: 720p primeiro
+  // ordena preferÃªncia: 720p primeiro
   formats.sort((a, b) => (b.itag === 22 ? 1 : 0) - (a.itag === 22 ? 1 : 0));
 
   await setState({
@@ -200,7 +281,7 @@ async function startFlow(payload, senderTabId) {
     source,
     video: {
       id: videoId,
-      title: payload.title || "Vídeo do YouTube",
+      title: payload.title || "VÃ­deo do YouTube",
       author: payload.author || "",
       durationSeconds: payload.lengthSeconds || 0,
     },
@@ -212,7 +293,7 @@ async function startFlow(payload, senderTabId) {
     assetId: null,
     error: null,
   });
-  try { await chrome.action.openPopup(); } catch (_) {}
+  notifyTab(tabId, payload && { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds })
 }
 
 async function beginTransfer(itag, workspaceId, projectId) {
@@ -223,13 +304,13 @@ async function beginTransfer(itag, workspaceId, projectId) {
   const fmt = state.formats.find((f) => f.itag === itag);
   if (!fmt) return;
 
-  // Guard pré-flight de tamanho
+  // Guard prÃ©-flight de tamanho
   const clen = parseInt(fmt.contentLength || 0, 10);
   if (clen > SAFE_MAX_BYTES) {
     await setState({
       phase: "READY",
       error: {
-        message: `Este vídeo em ${fmt.qualityLabel} tem ~${(clen / 1048576).toFixed(0)}MB e passa do limite seguro da API (${(SAFE_MAX_BYTES / 1048576).toFixed(0)}MB). Selecione uma qualidade menor.`,
+        message: `Este vÃ­deo em ${fmt.qualityLabel} tem ~${(clen / 1048576).toFixed(0)}MB e passa do limite seguro da API (${(SAFE_MAX_BYTES / 1048576).toFixed(0)}MB). Selecione uma qualidade menor.`,
       },
     });
     return;
@@ -277,7 +358,7 @@ async function cancelTransfer() {
   }
   if (state.phase === "PROCESSING" || state.phase === "TRIGGERING") {
     stopPolling();
-    await setState({ phase: "DONE_PARTIAL", notice: "Monitoramento cancelado — o processamento continua no ClipCon." });
+    await setState({ phase: "DONE_PARTIAL", notice: "Monitoramento cancelado â€” o processamento continua no ClipCon." });
   }
 }
 
@@ -330,7 +411,7 @@ async function startPolling(projectId, assetId) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const asset = (data.assets || []).find((a) => a.id === assetId);
-      if (!asset) throw new Error("Asset não encontrado no projeto");
+      if (!asset) throw new Error("Asset nÃ£o encontrado no projeto");
       if (asset.status === "ready") {
         await setState({ phase: "TRIGGERING" });
         triggerClipStudio(projectId, assetId);
@@ -345,7 +426,7 @@ async function startPolling(projectId, assetId) {
         badge("!", "#dc2626");
         return;
       }
-      // uploaded | processing → continua
+      // uploaded | processing â†’ continua
       if (Date.now() - startedAt > POLL_MAX_MS) throw new Error("Tempo esgotado aguardando processamento");
     } catch (e) {
       if (Date.now() - startedAt > POLL_MAX_MS) {
@@ -354,7 +435,7 @@ async function startPolling(projectId, assetId) {
         badge("!", "#dc2626");
         return;
       }
-      // erro transitório → tenta de novo
+      // erro transitÃ³rio â†’ tenta de novo
     }
     pollTimer = setTimeout(tick, POLL_INTERVAL_MS);
   };
@@ -379,7 +460,7 @@ async function triggerClipStudio(projectId, assetId) {
     }
     const data = await res.json().catch(() => ({}));
     stopPolling();
-    badge("✓", "#16a34a");
+    badge("âœ“", "#16a34a");
     await setState({
       phase: "DONE",
       runId: (data.run && data.run.id) || (data.job && data.job.id) || null,
@@ -445,6 +526,56 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
+  if (msg.type === "UI_AUTH_STATUS") {
+    getAuth().then((auth) => {
+      sendResponse({ loggedIn: !!auth, email: auth ? auth.session.email : null });
+    });
+    return true;
+  }
+  if (msg.type === "UI_LOGIN") {
+    loginWithPassword(String(msg.email || ""), String(msg.password || "")).then(sendResponse);
+    return true;
+  }
+  if (msg.type === "UI_LIST_WORKSPACES") {
+    (async () => {
+      const auth = await getAuth();
+      if (!auth) return sendResponse({ ok: false, error: "Sessão expirada" });
+      try {
+        const res = await fetch(`${auth.config.apiUrl}/v1/workspaces`, {
+          headers: { Authorization: `Bearer ${auth.token}` },
+        });
+        if (res.status === 401) return sendResponse({ ok: false, error: "Sessão expirada" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        sendResponse({ ok: true, workspaces: data.workspaces || [] });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+  if (msg.type === "UI_LIST_PROJECTS") {
+    (async () => {
+      const auth = await getAuth();
+      if (!auth) return sendResponse({ ok: false, error: "Sessão expirada" });
+      try {
+        const url =
+          `${auth.config.supabaseUrl}/rest/v1/projects?select=id,name,created_at` +
+          `&workspace_id=eq.${encodeURIComponent(msg.workspaceId)}&order=created_at.desc`;
+        const res = await fetch(url, {
+          headers: {
+            apikey: auth.config.publishableKey,
+            Authorization: `Bearer ${auth.token}`,
+          },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        sendResponse({ ok: true, projects: await res.json() });
+      } catch (e) {
+        sendResponse({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
 });
 
 async function handleJobEvent(event, data) {
@@ -476,7 +607,7 @@ async function handleJobEvent(event, data) {
     return;
   }
   if (event === "uploaded") {
-    badge("…", "#2563eb");
+    badge("â€¦", "#2563eb");
     await setState({
       phase: "PROCESSING",
       assetId: data.assetId,
@@ -488,7 +619,7 @@ async function handleJobEvent(event, data) {
   }
   if (event === "cancelled") {
     badge("");
-    await setState({ phase: "READY", progress: null, error: null, notice: "Transferência cancelada." });
+    await setState({ phase: "READY", progress: null, error: null, notice: "TransferÃªncia cancelada." });
     return;
   }
   if (event === "error") {

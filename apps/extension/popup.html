@@ -2,105 +2,23 @@
 <html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
-    <link rel="stylesheet" href="styles.css" />
+    <style>
+      body {
+        width: 240px;
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #14161d;
+        color: #e8eaf0;
+        padding: 16px;
+      }
+      .logo { font-weight: 800; letter-spacing: .2em; font-size: 12px; color: #9cc8a5; }
+      p { font-size: 12px; color: #8b93a7; line-height: 1.55; margin: 10px 0 0; }
+      .ver { margin-top: 12px; font-size: 10px; color: #5b6272; letter-spacing: .08em; }
+    </style>
   </head>
-  <body class="popup">
-    <header>
-      <span class="logo">CLIPCON</span>
-      <button id="open-settings" class="link" type="button">Configurações</button>
-    </header>
-
-    <main id="view"></main>
-
-    <template id="tpl-login">
-      <p class="muted">Conecte-se para enviar vídeos ao ClipCon.</p>
-      <button id="go-settings" class="primary" type="button">Abrir Configurações</button>
-    </template>
-
-    <template id="tpl-not-video">
-      <p class="muted">Abra um vídeo do YouTube para usar a extensão.</p>
-    </template>
-
-    <template id="tpl-error">
-      <div class="card error">
-        <p id="err-msg"></p>
-        <button id="btn-retry" class="primary" type="button">Tentar novamente</button>
-        <button id="btn-reset" class="ghost" type="button">Começar de novo</button>
-      </div>
-    </template>
-
-    <template id="tpl-capture-failed">
-      <div class="card error">
-        <p id="cf-msg"></p>
-        <button id="cf-close" class="ghost" type="button">Fechar</button>
-      </div>
-    </template>
-
-    <template id="tpl-form">
-      <section class="video-info">
-        <strong id="v-title"></strong>
-        <span class="muted" id="v-meta"></span>
-      </section>
-      <label>Workspace</label>
-      <select id="ws-select"><option>Carregando…</option></select>
-      <label>Projeto</label>
-      <select id="proj-select"><option>Carregando…</option></select>
-      <label>Qualidade</label>
-      <select id="q-select"></select>
-      <p class="muted small" id="q-note"></p>
-      <button id="btn-start" class="primary" type="button">Baixar e enviar</button>
-      <p class="muted tiny">O arquivo é baixado e enviado por este navegador. Nada fica no YouTube.</p>
-    </template>
-
-    <template id="tpl-transfer">
-      <section class="video-info">
-        <strong id="t-title"></strong>
-      </section>
-      <div class="phase-row" id="dl-row">
-        <span>Download</span><b id="dl-pct">0%</b>
-      </div>
-      <progress id="dl-bar" max="100" value="0"></progress>
-      <div class="phase-row" id="up-row">
-        <span>Upload</span><b id="up-pct">0%</b>
-      </div>
-      <progress id="up-bar" max="100" value="0"></progress>
-      <p class="muted small" id="bytes-info"></p>
-      <p class="notice" id="transfer-notice" hidden></p>
-      <button id="btn-cancel" class="ghost" type="button">Cancelar</button>
-      <p class="muted tiny">Pode fechar esta janela — a transferência continua.</p>
-    </template>
-
-    <template id="tpl-processing">
-      <section class="video-info"><strong id="p-title"></strong></section>
-      <div class="steps">
-        <div class="step ok">✓ Vídeo enviado</div>
-        <div class="step active">⟳ Processando asset (transcrição vem depois)</div>
-        <div class="step" id="step-cs">· Clip Studio</div>
-      </div>
-      <p class="notice" id="proc-notice" hidden></p>
-      <button id="btn-cancel-watch" class="ghost" type="button">Parar de acompanhar</button>
-      <p class="muted tiny">Pode fechar esta janela. O processamento continuará no ClipCon.</p>
-    </template>
-
-    <template id="tpl-done">
-      <div class="steps final">
-        <div class="step ok">✓ Vídeo enviado</div>
-        <div class="step ok">✓ Asset pronto</div>
-        <div class="step ok">✓ Clip Studio iniciado</div>
-      </div>
-      <p class="success">Você pode fechar esta janela.<br/>O processamento continuará no ClipCon.</p>
-      <button id="btn-new" class="ghost" type="button">Enviar outro vídeo</button>
-    </template>
-
-    <template id="tpl-partial">
-      <div class="steps">
-        <div class="step ok">✓ Vídeo enviado</div>
-        <div class="step ok">✓ Processamento em andamento no ClipCon</div>
-      </div>
-      <p class="notice" id="part-notice"></p>
-      <button id="btn-part-ok" class="primary" type="button">Ok</button>
-    </template>
-
+  <body>
+    <span class="logo">CLIPCON INGEST</span>
+    <p>Abra um vídeo no YouTube e use o botão <b>“Adicionar ao ClipCon”</b> na própria página.</p>
+    <div class="ver">v<span id="ver"></span></div>
     <script src="popup.js"></script>
   </body>
 </html>
