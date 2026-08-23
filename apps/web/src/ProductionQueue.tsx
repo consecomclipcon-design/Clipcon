@@ -123,22 +123,21 @@ export function ProductionQueue({
   }, [load]);
 
   const groups: Group[] = useMemo(() => {
-    const activeProjects = new Map<string, RunJob>();
-    for (const run of runs) {
-      if (["queued", "processing"].includes(run.status)) {
-        activeProjects.set(run.project_id, run);
-      }
-    }
+    const RECENT_MS = 24 * 3600_000;
     const out: Group[] = [];
     for (const run of runs) {
       const isActive = ["queued", "processing"].includes(run.status);
+      const isError = run.status === "error";
+      const recent = Date.now() - new Date(run.created_at).getTime() < RECENT_MS;
       const projectClips = clips.filter(
         (c) =>
           c.project_id === run.project_id &&
           !c.publication &&
           (isActive || Date.now() - new Date(c.created_at).getTime() < 3600_000),
       );
-      if (!isActive && projectClips.length === 0) continue;
+      // Runs ativos sempre aparecem; erros aparecem por 24h mesmo sem clips
+      // (falhas silenciosas eram invisíveis antes — bug de UX grave).
+      if (!isActive && !(isError && recent) && projectClips.length === 0) continue;
       out.push({
         run,
         name: run.projects?.name ?? "Vídeo",
@@ -184,10 +183,11 @@ export function ProductionQueue({
       {!loading && !groups.length && (
         <div className="pq-empty">
           <span className="pq-empty-glyph">🏭</span>
-          <strong>Nada na linha de produção agora</strong>
+          <strong>Nada na linha de produção desta workspace</strong>
           <p>
-            Envie um vídeo pela aba Clips — ele aparece aqui instantaneamente,
-            etapa por etapa, até os clips ficarem prontos para revisão.
+            Envie um vídeo pela aba Clips — ele aparece aqui instantaneamente.
+            Se você acabou de enviar, confira se a workspace selecionada no
+            seletor acima é a mesma usada no envio.
           </p>
         </div>
       )}
