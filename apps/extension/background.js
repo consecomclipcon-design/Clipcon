@@ -392,12 +392,24 @@ async function startFlow(payload, senderTabId) {
 }
 
 async function beginTransfer(itag, workspaceId, projectId) {
+  try {
   const state = await getState();
   const auth = await getAuth();
-  if (!state || !auth) return;
+  if (!state) {
+    await setState({ phase: "ERROR", error: { stage: "start", message: "Estado interno perdido — reabra o painel e tente de novo." } });
+    badge("!", "#dc2626");
+    return;
+  }
+  if (!auth) {
+    await setState({ phase: "NEED_LOGIN", error: { message: "Sessão expirada — clique em Conectar extensão novamente." } });
+    return;
+  }
 
   const fmt = state.formats.find((f) => f.itag === itag);
-  if (!fmt) return;
+  if (!fmt || !fmt.url) {
+    await setState({ phase: "READY", error: { stage: "start", message: "Formato selecionado não encontrado — escolha a qualidade novamente." } });
+    return;
+  }
 
   // Guard prÃ©-flight de tamanho
   const clen = parseInt(fmt.contentLength || 0, 10);
@@ -443,6 +455,13 @@ async function beginTransfer(itag, workspaceId, projectId) {
       token: auth.token,
     },
   });
+  } catch (err) {
+    await setState({
+      phase: "ERROR",
+      error: { stage: "start", message: "Falha ao iniciar: " + (err && err.message ? err.message : String(err)) },
+    });
+    badge("!", "#dc2626");
+  }
 }
 
 async function cancelTransfer() {
@@ -496,11 +515,13 @@ function stopPolling() {
 async function startPolling(projectId, assetId) {
   stopPolling();
   const startedAt = Date.now();
+  let pollCount = 0;
   const tick = async () => {
     const state = await getState();
     if (!state || state.phase !== "PROCESSING" || state.assetId !== assetId) return;
     const auth = await getAuth();
     if (!auth) return;
+    pollCount += 1;
     try {
       const res = await fetch(`${auth.config.apiUrl}/v1/projects/${projectId}/assets`, {
         headers: { Authorization: `Bearer ${auth.token}` },
@@ -508,7 +529,8 @@ async function startPolling(projectId, assetId) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const asset = (data.assets || []).find((a) => a.id === assetId);
-      if (!asset) throw new Error("Asset nÃ£o encontrado no projeto");
+      if (!asset) throw new Error("Asset não encontrado no projeto");
+      await setState({ pollInfo: { count: pollCount, assetStatus: asset.status } });
       if (asset.status === "ready") {
         await setState({ phase: "TRIGGERING" });
         triggerClipStudio(projectId, assetId);

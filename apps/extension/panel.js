@@ -99,7 +99,10 @@
     ".track i{flex:1;height:4px;border-radius:99px;background:#232834}" +
     ".track i.on{background:#16a34a}" +
     ".track i.act{background:#2563eb;animation:ccpulse 1.2s ease-in-out infinite alternate}" +
-    "@keyframes ccpulse{from{opacity:.55}to{opacity:1}}";
+    "@keyframes ccpulse{from{opacity:.55}to{opacity:1}}" +
+    "progress.bigbar{height:10px}" +
+    ".overall-row b{color:#9cc8a5;font-variant-numeric:tabular-nums}" +
+    ".eta-inline{color:#8b93a7;font-size:11px}";
 
   function ensure() {
     if (host) return;
@@ -114,6 +117,18 @@
     root.append(el("style", {}, [document.createTextNode(CSS)]));
     root.append(el("div", { class: "panel" }));
     document.documentElement.append(host);
+    startTicker();
+  }
+
+  // Re-render a cada 1s enquanto houver fase ativa — mantém ETA/⏱ vivos
+  let ticker = null;
+  function startTicker() {
+    if (ticker) return;
+    ticker = setInterval(() => {
+      if (!host) return;
+      const ph = jobState && jobState.phase;
+      if (["DOWNLOADING", "UPLOADING", "PROCESSING", "TRIGGERING"].includes(ph)) render();
+    }, 1000);
   }
   function close() {
     if (host) {
@@ -299,6 +314,13 @@
   }
 
   function bodyChildren() {
+    if (meta.pendingStart && (!jobState || ["FORM", "READY"].includes(jobState.phase))) {
+      return [
+        el("div", { class: "phase-tag", text: "⟳ Iniciando transferência…" }),
+        track(0),
+        el("div", { class: "note", text: "Preparando download no navegador…" }),
+      ];
+    }
     if (!meta.authChecked) {
       return [el("div", { class: "note", text: "Conectando ao ClipCon…" })];
     }
@@ -395,10 +417,9 @@
     out.push(qSel);
 
     const selText = qSel.selectedOptions[0] ? qSel.selectedOptions[0].textContent : "";
-    let noteText = "";
-    if (/excede/.test(selText)) noteText = "Este arquivo passa do limite seguro da API — escolha uma qualidade menor.";
-    else if (/~/.test(selText)) noteText = "Tamanho estimado: " + selText.split("~")[1];
-    out.push(el("div", { class: /excede/.test(noteText) ? "note warn" : "note", text: noteText }));
+    if (/excede/.test(selText)) {
+      out.push(el("div", { class: "note warn", text: "Este arquivo passa do limite seguro da API — escolha uma qualidade menor." }));
+    }
 
     const startBtn = el("button", {
       class: "p",
@@ -408,12 +429,25 @@
         if (!meta.selectedWs || !meta.selectedProj || !meta.selectedItag) return;
         startBtn.disabled = true;
         startBtn.textContent = "Iniciando…";
-        await send({
+        meta.pendingStart = true;
+        render();
+        const r = await send({
           type: "UI_START",
           itag: meta.selectedItag,
           workspaceId: meta.selectedWs,
           projectId: meta.selectedProj,
         });
+        // Watchdog: se em 6s nenhum STATE mudou a fase, algo falhou silenciosamente
+        setTimeout(() => {
+          if (meta.pendingStart) {
+            meta.pendingStart = false;
+            jobState = {
+              phase: "ERROR",
+              error: { stage: "start", message: "A extensão não respondeu ao iniciar. Verifique se o service worker está ativo e tente novamente." },
+            };
+            render();
+          }
+        }, 6000);
       },
     });
     out.push(startBtn);
@@ -457,6 +491,7 @@
     const stageIdx = isDl ? 0 : 1;
 
     const out = [];
+    out.push(bigbar(st));
     out.push(el("div", { class: "phase-tag", text: isDl ? "⟳ Baixando vídeo do YouTube…" : "⟳ Enviando para o ClipCon…" }));
     out.push(track(stageIdx));
     out.push(...videoBlock(st.video));
@@ -478,6 +513,7 @@
 
   function stepsView(st, activeIdx) {
     const out = [];
+    out.push(bigbar(st));
     out.push(
       el("div", {
         class: "phase-tag",
@@ -485,6 +521,18 @@
       })
     );
     out.push(track(activeIdx + 1));
+    if (st.pollInfo) {
+      out.push(
+        el("div", {
+          class: "note",
+          text:
+            `Verificação nº ${st.pollInfo.count} · status do asset no servidor: ${st.pollInfo.assetStatus}` +
+            (st.pollInfo.assetStatus === "queued" ? " (na fila do worker)" : ""),
+        })
+      );
+    } else if (activeIdx < 2) {
+      out.push(el("div", { class: "note", text: "Primeira verificação em até 5 segundos…" }));
+    }
     out.push(...videoBlock(st.video));
     out.push(
       el("div", { class: "steps" }, [
@@ -542,15 +590,85 @@
     if (!msg || typeof msg !== "object") return;
     if (msg.type === "STATE") {
       jobState = msg.job;
+      if (jobState && jobState.phase !== "READY" && jobState.phase !== "FORM") meta.pendingStart = false;
       if (jobState && jobState.phase === "READY" && Array.isArray(jobState.formats)) {
         if (jobState.video && jobState.video.id) meta.video = jobState.video;
         meta.formats = jobState.formats;
       }
+      sampleSpeed();
       if (host) render();
     } else if (msg.type === "OPEN_PANEL") {
       open(msg.video || null);
     }
   });
+
+  /* ---------- velocidade / ETA / progresso global ---------- */
+  const samples = []; // {t, recv, phase}
+  function sampleSpeed() {
+    const st = jobState;
+    if (!st || !st.progress || !st.progress.total) return;
+    samples.push({ t: Date.now(), recv: st.progress.received, phase: st.progress.phase });
+    if (samples.length > 12) samples.shift();
+  }
+  function speedBps() {
+    const now = Date.now();
+    const win = samples.filter((s) => now - s.t < 8000);
+    if (win.length < 2) return 0;
+    const a = win[0], b = win[win.length - 1];
+    const dt = (b.t - a.t) / 1000;
+    const dr = b.recv - a.recv;
+    return dt > 0.4 && dr >= 0 ? dr / dt : 0;
+  }
+  function fmtEta(sec) {
+    if (!Number.isFinite(sec) || sec <= 0) return "instantâneo";
+    if (sec < 60) return `~${Math.ceil(sec)}s`;
+    return `~${Math.floor(sec / 60)}m${String(Math.ceil(sec % 60)).padStart(2, "0")}s`;
+  }
+
+  // Pesos: download 45% · upload 45% · processamento+trigger 10%
+  function overall(st) {
+    const p = st.progress || { phase: "download", received: 0, total: 0 };
+    const dlFrac = p.total ? Math.min(1, (p.phase === "download" ? p.received : p.total) / p.total) : 0;
+    const upFrac = p.total ? Math.min(1, (!isDownloadPhase(st) ? p.received : 0) / p.total) : 0;
+    let pct;
+    let etaText = "";
+    if (st.phase === "DOWNLOADING") {
+      pct = dlFrac * 45;
+      const sp = speedBps();
+      if (sp > 0 && p.total) etaText = fmtEta((p.total - p.received) / sp);
+    } else if (st.phase === "UPLOADING") {
+      pct = 45 + upFrac * 45;
+      const sp = speedBps();
+      if (sp > 0 && p.total) etaText = fmtEta(Math.max(0, p.total - p.received) / sp);
+    } else if (st.phase === "PROCESSING") {
+      pct = 90 + Math.min(5, elapsedSec(st) / 60); // sobe devagar até 95%
+    } else if (st.phase === "TRIGGERING") {
+      pct = 96;
+    } else if (st.phase === "DONE") {
+      pct = 100;
+    } else {
+      pct = 0;
+    }
+    return { pct: Math.round(pct), etaText };
+  }
+  function isDownloadPhase(st) { return st.phase === "DOWNLOADING"; }
+  function elapsedSec(st) { return st.startedAt ? Math.max(0, (Date.now() - st.startedAt) / 1000) : 0; }
+  function bigbar(st) {
+    const o = overall(st);
+    const wrap = el("div");
+    wrap.append(
+      el("div", { class: "row overall-row" }, [
+        el("span", { text: "Progresso total" }),
+        el("b", { text: o.pct + "%" + (o.etaText ? " · ⏳ " + o.etaText : "") }),
+      ])
+    );
+    const pr = document.createElement("progress");
+    pr.className = "bigbar";
+    pr.max = 100;
+    pr.value = o.pct;
+    wrap.append(pr);
+    return wrap;
+  }
 
   window.__clipconPanel = {
     open,
