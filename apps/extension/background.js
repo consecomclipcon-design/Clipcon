@@ -122,21 +122,58 @@ async function ensureOffscreen() {
 
 /* ---------------- config + auth ---------------- */
 let _cfgPromise = null;
+const FALLBACK_WEB_URL = "https://clipcon-web-production.up.railway.app";
+
+function parseConfigJs(text) {
+  const m = /window\.__CLIPCON_CONFIG__\s*=\s*(\{.*\});?\s*$/s.exec(text);
+  if (!m) return null;
+  const c = JSON.parse(m[1]);
+  // normaliza nome do campo (API usa supabasePublishableKey)
+  return {
+    supabaseUrl: c.supabaseUrl,
+    publishableKey: c.supabasePublishableKey || c.publishableKey,
+  };
+}
+
+async function fetchConfigFrom(base) {
+  const res = await fetch(`${base}/config.js`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`config HTTP ${res.status}`);
+  return parseConfigJs(await res.text());
+}
+
 async function getConfig() {
   if (!_cfgPromise) {
     _cfgPromise = (async () => {
       const { config } = await chrome.storage.local.get("config");
       if (config && config.fetchedAt && Date.now() - config.fetchedAt < 24 * 3600_000) return config;
-      const res = await fetch(`${DEFAULT_API_URL}/config.js`, { cache: "no-store" });
-      if (!res.ok) throw new Error(`config HTTP ${res.status}`);
-      const text = await res.text();
-      const m = /window\.__CLIPCON_CONFIG__\s*=\s*(\{.*\});?\s*$/s.exec(text);
-      if (!m) throw new Error("config invÃ¡lida");
-      const cfg = JSON.parse(m[1]);
+      // 1) API de producao; 2) fallback: config publico servido pelo web app
+      let cfg = null;
+      let lastErr = null;
+      try {
+        cfg = await fetchConfigFrom(DEFAULT_API_URL);
+      } catch (e) {
+        lastErr = e;
+      }
+      if (!cfg || !cfg.supabaseUrl || !cfg.publishableKey) {
+        try {
+          const webCfg = await fetchConfigFrom(FALLBACK_WEB_URL);
+          cfg = {
+            supabaseUrl: (webCfg && webCfg.supabaseUrl) || (cfg && cfg.supabaseUrl),
+            publishableKey: (webCfg && webCfg.publishableKey) || (cfg && cfg.publishableKey),
+          };
+        } catch (e) {
+          lastErr = lastErr || e;
+        }
+      }
+
+      if (!cfg || !cfg.supabaseUrl || !cfg.publishableKey) {
+        _cfgPromise = null;
+        throw new Error(lastErr ? "config indisponivel: " + lastErr.message : "config incompleta");
+      }
       const next = {
         supabaseUrl: cfg.supabaseUrl,
         publishableKey: cfg.publishableKey,
-        apiUrl: cfg.apiUrl || DEFAULT_API_URL,
+        apiUrl: DEFAULT_API_URL,
         fetchedAt: Date.now(),
       };
       await chrome.storage.local.set({ config: next });
