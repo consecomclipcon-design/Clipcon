@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "ClipCon Ingest",
+  "version": "0.1.0",
+  "description": "Envie vídeos do YouTube direto para o ClipCon a partir do seu navegador.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "offscreen", "webRequest"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://*.googlevideo.com/*",
+    "https://*.supabase.co/*",
+    "https://*.railway.app/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ClipCon Ingest"
+  },
+  "options_ui": { "page": "settings.html", "open_in_tab": true },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/watch*", "https://m.youtube.com/watch*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"]
+    }
+  ]
+}

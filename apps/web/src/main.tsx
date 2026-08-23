@@ -129,6 +129,20 @@ function App() {
   } | null>(null);
   const sessionRef = useRef<Session | null>(null);
   sessionRef.current = session;
+  const [extVersion, setExtVersion] = useState("0.1.0");
+
+  useEffect(() => {
+    let active = true;
+    fetch("/downloads/extension-meta.json", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m) => {
+        if (active && m && typeof m.version === "string") setExtVersion(m.version);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => writeStored("clipcon:view", view), [view]);
   useEffect(() => writeStored("clipcon:product-tab", productTab), [productTab]);
@@ -546,6 +560,17 @@ function App() {
         <div className="side-label system-label">SISTEMA</div>
         <Nav active={view} onClick={setView} icon="◔" label="Integrações" value="settings" />
         <Nav active={view} onClick={setView} icon="◇" label="AI Providers" value="ai-providers" />
+        <div className="extension-block">
+          <a
+            className="extension-download"
+            href={`/downloads/clipcon-extension-v${extVersion}.zip`}
+            download
+            title="Baixar extensão Chrome/Edge para enviar vídeos do YouTube ao ClipCon"
+          >
+            ⬇ Baixar extensão
+          </a>
+          <span className="extension-version">v{extVersion}</span>
+        </div>
         <div className="sidebar-bottom">
           <span className="workspace-dot" />
           {tenant.name}

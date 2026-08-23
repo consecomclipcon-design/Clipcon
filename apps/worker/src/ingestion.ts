@@ -227,7 +227,12 @@ export class YtDlpProvider implements MediaIngestionProvider {
       message: error.message,
       type,
       provider: this.name,
-      recoverable: type === "BOT_BLOCK" || type === "RATE_LIMIT" || type === "NETWORK_ERROR",
+      recoverable:
+        type === "BOT_BLOCK" ||
+        type === "RATE_LIMIT" ||
+        type === "NETWORK_ERROR" ||
+        type === "GEO_BLOCKED" ||
+        type === "VIDEO_UNAVAILABLE",
       originalError: error,
     };
   }
@@ -337,13 +342,184 @@ export class LocalFileProvider implements MediaIngestionProvider {
   }
 }
 
+export class RemoteIngestionProvider implements MediaIngestionProvider {
+  readonly name = "remote-ingestion-br";
+  readonly supportedTypes: MediaSourceType[] = ["youtube", "direct_url"];
+
+  constructor(
+    private readonly remoteUrl: string,
+    private readonly token: string,
+    private readonly supabaseUrl: string,
+    private readonly supabaseKey: string,
+  ) {}
+
+  canHandle(source: string): boolean {
+    return isYouTubeUrl(source) || source.startsWith("http");
+  }
+
+  async getMetadata(source: string): Promise<MediaMetadata> {
+    const result = await this.fetchRemote(source);
+    if (result && result.title) return { title: result.title };
+    return { videoId: extractYouTubeId(source) };
+  }
+
+  async ingest(source: string, workDir: string): Promise<IngestionResult> {
+    try {
+      const result = await this.fetchIngest(source);
+      if (result && result.success) {
+        const localPath = await this.downloadFromStorage(result.storage_path, workDir);
+        return {
+          localPath,
+          metadata: { videoId: result.youtube_video_id },
+          provider: this.name,
+          downloadedAt: new Date(),
+        };
+      }
+    } catch (e) {
+      console.warn(
+        "[RemoteIngestionProvider] remote ingest failed, falling back to local:",
+        (e as Error).message,
+      );
+    }
+    throw new Error("Remote ingestion failed; falling back to local provider");
+  }
+
+  private async downloadFromStorage(storagePath: string, workDir: string): Promise<string> {
+    if (!this.supabaseUrl || !this.supabaseKey)
+      throw new Error("Supabase credentials not available for storage download");
+    const { createClient } = await import("@supabase/supabase-js");
+    const admin = createClient(this.supabaseUrl, this.supabaseKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+    console.log(`[RemoteIngestionProvider] baixando asset do Storage: ${storagePath}`);
+    const { data, error } = await admin.storage.from("clipcon-media").download(storagePath);
+    if (error || !data) throw new Error(`Storage download failed: ${error?.message ?? "no data"}`);
+    const buffer = Buffer.from(await data.arrayBuffer());
+    if (buffer.length === 0) throw new Error("Storage download returned empty file");
+    const localPath = join(workDir, "source.mp4");
+    await writeFile(localPath, buffer);
+    console.log(`[RemoteIngestionProvider] asset local: ${localPath} (${Math.round(buffer.length / 1024)}KB)`);
+    return localPath;
+  }
+
+  private async fetchIngest(source: string): Promise<{
+    success: boolean;
+    storage_path: string;
+    youtube_video_id: string;
+    size_bytes?: number;
+    duration_seconds?: number;
+  } | null> {
+    if (!this.remoteUrl) throw new Error("Remote URL not configured");
+
+    const videoId = extractYouTubeId(source);
+    if (!videoId) throw new Error("Invalid YouTube URL");
+
+    const body: Record<string, unknown> = { url: source, youtube_video_id: videoId };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json; charset=utf-8",
+    };
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+
+    // Health check (no timeout in init, use AbortController pattern)
+    const healthAbort = new AbortController();
+    const healthTimeout = setTimeout(() => healthAbort.abort(), 5000);
+    try {
+      const healthRes = await fetch(`${this.remoteUrl}/health`, {
+        signal: healthAbort.signal,
+      });
+      clearTimeout(healthTimeout);
+      if (!healthRes.ok) throw new Error(`health ${healthRes.status}`);
+    } catch {
+      throw new Error("Remote service health check failed");
+    }
+
+    // Ingest request with timeout
+    const ingestAbort = new AbortController();
+    const ingestTimeout = setTimeout(() => ingestAbort.abort(), 16 * 60_000);
+    const res = await fetch(`${this.remoteUrl}/ingest`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: ingestAbort.signal,
+    });
+    clearTimeout(ingestTimeout);
+
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`Remote service returned ${res.status}: ${txt}`);
+    }
+
+    return res.json();
+  }
+
+  private async fetchRemote(source: string): Promise<{ title?: string } | null> {
+    const videoId = extractYouTubeId(source);
+    if (!videoId) return null;
+    try {
+      const abortCtrl = new AbortController();
+      const to = setTimeout(() => abortCtrl.abort(), 10000);
+      const res = await fetch(
+        `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+        { signal: abortCtrl.signal }
+      );
+      clearTimeout(to);
+      if (!res.ok) return null;
+      const data = await res.json();
+      return { title: data.title };
+    } catch {
+      return null;
+    }
+  }
+
+  classifyError(error: Error): IngestionError {
+    const msg = error.message.toLowerCase();
+    let type: IngestionErrorType = "NETWORK_ERROR";
+
+    if (msg.includes("429") || msg.includes("rate limit")) type = "RATE_LIMIT";
+    else if (msg.includes("unavailable") || msg.includes("not found"))
+      type = "VIDEO_UNAVAILABLE";
+    else if (msg.includes("geo") || msg.includes("country")) type = "GEO_BLOCKED";
+    else if (msg.includes("age") || msg.includes("restricted")) type = "AGE_RESTRICTED";
+    else if (msg.includes("private")) type = "PRIVATE_VIDEO";
+    else if (msg.includes("copyright")) type = "COPYRIGHT";
+    else if (
+      msg.includes("network") ||
+      msg.includes("timeout") ||
+      msg.includes("econnrefused")
+    )
+      type = "NETWORK_ERROR";
+
+    return {
+      name: "IngestionError",
+      message: error.message,
+      type,
+      provider: this.name,
+      recoverable: type !== "COPYRIGHT",
+      originalError: error,
+    };
+  }
+}
+
+const providers: MediaIngestionProvider[] = [
+  new YouTubeCaptionsProvider(),
+  new YtDlpProvider(),
+  new DirectUrlProvider(),
+  new LocalFileProvider(),
+];
+
+if (config.ingestionProvider === "remote" && config.remoteIngestionUrl) {
+  providers.unshift(
+    new RemoteIngestionProvider(
+      config.remoteIngestionUrl,
+      config.ingestionToken ?? "",
+      config.SUPABASE_URL ?? "",
+      config.SUPABASE_SECRET_KEY ?? "",
+    ),
+  );
+}
+
 export class MediaIngestionManager {
-  private providers: MediaIngestionProvider[] = [
-    new YouTubeCaptionsProvider(),
-    new YtDlpProvider(),
-    new DirectUrlProvider(),
-    new LocalFileProvider(),
-  ];
+  private providers: MediaIngestionProvider[] = providers;
 
   addProvider(provider: MediaIngestionProvider) {
     this.providers.unshift(provider);

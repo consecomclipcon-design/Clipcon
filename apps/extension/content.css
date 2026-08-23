@@ -1,0 +1,17 @@
+/* Apenas o botão flutuante injetado na página do YouTube */
+.clipcon-btn {
+  position: fixed;
+  right: 20px;
+  bottom: 84px;
+  z-index: 999999;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 18px;
+  font: 600 13px system-ui, -apple-system, sans-serif;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,.35);
+}
+.clipcon-btn:hover { background: #1d4fd8; }
+.clipcon-btn:disabled { opacity: .6; cursor: default; }
