@@ -75,7 +75,7 @@ app.get("/health/deep", async (_request, reply) => {
     worst = overall("failed");
   }
 
-  // queue: jobs órfãos/presos
+  // queue: jobs Ã³rfÃ£os/presos
   try {
     const staleCutoff = new Date(Date.now() - 60 * 60_000).toISOString();
     const [{ count: processing }, { count: queued }] = await Promise.all([
@@ -173,7 +173,7 @@ app.post("/v1/extension/pair", async (request, reply) => {
   if (!refreshToken)
     return reply.code(400).send({ error: "refresh_token is required" });
   // Refresh tokens do Supabase podem ser opacos (nao-JWT). Se for JWT,
-  // exigimos que pertença ao usuario da sessao; se opaco, a posse via
+  // exigimos que pertenÃ§a ao usuario da sessao; se opaco, a posse via
   // requisicao autenticada (hook ja validou access token) e suficiente.
   const payload = decodeJwt(refreshToken);
   if (payload && payload.sub && payload.sub !== request.user!.id) {
@@ -183,7 +183,7 @@ app.post("/v1/extension/pair", async (request, reply) => {
   let code = "CC-";
   for (let i = 0; i < 8; i++)
     code += alphabet[Math.floor(Math.random() * alphabet.length)];
-  // limpa expirados para o map não crescer sem limite
+  // limpa expirados para o map nÃ£o crescer sem limite
   const now = Date.now();
   for (const [k, v] of pairCodes) if (v.exp < now) pairCodes.delete(k);
   pairCodes.set(code, {
@@ -209,12 +209,13 @@ app.post("/v1/extension/claim", async (request, reply) => {
   if (bucket.n > 20)
     return reply.code(429).send({ error: "Too many attempts" });
 
-  const body = request.body as { code?: string };
-  const code = body.code?.trim().toUpperCase();
-  const entry = code ? pairCodes.get(code) : undefined;
+  const body = (request.body ?? {}) as { code?: string };
+  const rawCode = typeof body.code === "string" ? body.code : "";
+  const code = rawCode.trim().toUpperCase();
+  const entry = /^CC-[A-Z2-9]{8}$/.test(code) ? pairCodes.get(code) : undefined;
   if (!entry || entry.exp < now) {
     if (code) pairCodes.delete(code);
-    return reply.code(404).send({ error: "Código inválido ou expirado" });
+    return reply.code(404).send({ error: "CÃ³digo invÃ¡lido ou expirado" });
   }
   pairCodes.delete(code!);
   return { refresh_token: entry.refreshToken };
@@ -672,7 +673,7 @@ app.post("/v1/projects", async (request, reply) => {
   const compositionMode = body?.composition_mode === "split_screen" ? "split_screen" : "primary_only";
   const videoId = sourceUrl ? youtubeVideoId(sourceUrl) : null;
   const folderStamp = new Date().toISOString().replace("T", " ").slice(0, 16).replace(/:/g, "-");
-  const name = body?.name?.trim() || (body?.clip_mode && sourceUrl ? `Vídeo ${videoId ?? "novo"} · ${folderStamp}` : "");
+  const name = body?.name?.trim() || (body?.clip_mode && sourceUrl ? `VÃ­deo ${videoId ?? "novo"} Â· ${folderStamp}` : "");
   const secondaryVideoId = compositionMode === "split_screen" && secondarySourceUrl ? youtubeVideoId(secondarySourceUrl) : null;
   if (!tenantId || !name || (sourceUrl && !videoId) || (compositionMode === "split_screen" && (!secondarySourceUrl || !secondaryVideoId)))
     return reply.code(400).send({
@@ -2304,6 +2305,7 @@ app.get("/*", async (request, reply) => {
   }
 });
 app.setErrorHandler((error, _request, reply) => {
+  console.error("[api] unhandled:", error);
   app.log.error(error);
   return reply.code(500).send({ error: "Unexpected server error" });
 });
