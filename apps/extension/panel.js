@@ -178,10 +178,8 @@
     meta.email = r ? r.email : null;
     if (!meta.loggedIn) {
       const paired = await tryClipboardPair();
-      if (paired) {
-        meta.loggedIn = true;
-        meta.email = paired.email || null;
-        meta.authError = null;
+      if (paired && paired.ok) {
+        await afterAuthSuccess(paired.email);
       }
     }
     render();
@@ -208,6 +206,14 @@
   // no ClipCon DEPOIS de abrir o painel).
   let pairTimer = null;
   let pairTries = 0;
+  async function afterAuthSuccess(email) {
+    meta.loggedIn = true;
+    if (email) meta.email = email;
+    meta.authError = null;
+    await send({ type: "UI_READY_AFTER_AUTH" });
+    render();
+    await loadWorkspaces();
+  }
   function startPairWatch() {
     if (pairTimer) return;
     pairTimer = setInterval(async () => {
@@ -220,11 +226,7 @@
         const r = await send({ type: "UI_PAIR", code: m[0] });
         if (r && r.ok) {
           stopPairWatch();
-          meta.loggedIn = true;
-          meta.email = r.email || null;
-          meta.authError = null;
-          render();
-          await loadWorkspaces();
+          await afterAuthSuccess(r.email);
         }
       } catch (_) {}
     }, 3000);
@@ -274,10 +276,7 @@
         btn.textContent = "Entrando…";
         const r = await send({ type: "UI_LOGIN", email: email.value.trim(), password: pass.value });
         if (r && r.ok) {
-          meta.loggedIn = true;
-          meta.email = r.email;
-          meta.authError = null;
-          await loadWorkspaces();
+          await afterAuthSuccess(r.email);
         } else {
           meta.authError = (r && r.error) || "Credenciais inválidas";
           render();

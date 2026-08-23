@@ -332,54 +332,65 @@ function resolveFormats(videoId, progressiveFormats) {
 }
 
 async function startFlow(payload, senderTabId) {
+  const tabId = senderTabId;
+  const videoId = payload ? payload.videoId : undefined;
+  const videoMeta = payload
+    ? {
+        id: videoId,
+        title: payload.title,
+        author: payload.author,
+        durationSeconds: payload.lengthSeconds,
+      }
+    : null;
+
+  // EstratÃ©gia A (player response) â†’ B (webRequest cache)
+  const resolved = resolveFormats(videoId, payload && payload.progressiveFormats);
+  const formats = resolved.formats
+    .slice()
+    .sort((a, b) => (b.itag === 22 ? 1 : 0) - (a.itag === 22 ? 1 : 0));
+  const source = resolved.source;
+
   const auth = await getAuth();
   if (!auth) {
+    // Preserva vÃ­deo+formatos para reconstruir READY apÃ³s autenticaÃ§Ã£o
     await setState({
       phase: "NEED_LOGIN",
-      error: { message: "Conecte-se em ConfiguraÃ§Ãµes antes de enviar vÃ­deos." },
+      error: { message: "Conecte-se ao ClipCon para enviar vÃ­deos." },
+      video: videoMeta,
+      formats,
+      source,
+      tabId,
     });
-    notifyTab(tabId, payload && { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds })
+    notifyTab(tabId, videoMeta);
     return;
   }
 
   const existing = await getState();
   if (existing && ["DOWNLOADING", "UPLOADING", "PROCESSING", "TRIGGERING"].includes(existing.phase)) {
-    notifyTab(tabId, payload && { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds })
+    notifyTab(tabId, videoMeta);
     return;
   }
-
-  // EstratÃ©gia A (player response) â†’ B (webRequest cache)
-  const videoId = payload && payload.videoId;
-  const resolved = resolveFormats(videoId, payload && payload.progressiveFormats);
-  const formats = resolved.formats;
-  const source = resolved.source;
 
   if (!formats.length) {
     await setState({
       phase: "CAPTURE_FAILED",
-      video: payload ? { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds } : null,
+      video: videoMeta,
+      formats: [],
+      source: null,
       error: {
         message:
           "NÃ£o foi possÃ­vel capturar um formato compatÃ­vel (720p/360p progressivo). DÃª play no vÃ­deo por ~5 segundos e tente novamente. Se persistir, este vÃ­deo nÃ£o expÃµe formato capturÃ¡vel.",
       },
     });
-    notifyTab(tabId, payload && { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds })
+    notifyTab(tabId, videoMeta);
     return;
   }
 
-  // ordena preferÃªncia: 720p primeiro
-  formats.sort((a, b) => (b.itag === 22 ? 1 : 0) - (a.itag === 22 ? 1 : 0));
-
   await setState({
     phase: "READY",
-    tabId: senderTabId,
+    tabId,
     source,
-    video: {
-      id: videoId,
-      title: payload.title || "VÃ­deo do YouTube",
-      author: payload.author || "",
-      durationSeconds: payload.lengthSeconds || 0,
-    },
+    video: videoMeta || { id: videoId, title: "VÃ­deo do YouTube" },
     formats,
     selectedQualityItag: null,
     workspaceId: null,
@@ -387,8 +398,9 @@ async function startFlow(payload, senderTabId) {
     progress: null,
     assetId: null,
     error: null,
+    pollInfo: null,
   });
-  notifyTab(tabId, payload && { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds })
+  notifyTab(tabId, videoMeta);
 }
 
 async function resolveProjectId(auth, workspaceId, tenantId, videoTitle) {
@@ -436,6 +448,13 @@ async function startTransfer(params) {
     if (!auth)
       return { ok: false, error: "Sessão expirada — clique em 🔗 Conectar extensão no ClipCon novamente." };
 
+    if (!Array.isArray(state.formats) || !state.formats.length) {
+      const rebuilt = resolveFormats(state.video && state.video.id, state.formats);
+      if (rebuilt.formats.length) {
+        await setState({ formats: rebuilt.formats, source: rebuilt.source });
+        state.formats = rebuilt.formats;
+      }
+    }
     fmt = Array.isArray(state.formats)
       ? state.formats.find((f) => f.itag === itag)
       : undefined;
@@ -656,6 +675,43 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "GET_PAGE_VIDEO") return; // tratado no content script
+
+  if (msg.type === "UI_READY_AFTER_AUTH") {
+    (async () => {
+      const st = await getState();
+      if (!st) return sendResponse({ ok: false, error: "no-job" });
+      if (!["NEED_LOGIN", "CAPTURE_FAILED", "ERROR", "READY"].includes(st.phase))
+        return sendResponse({ ok: true, phase: st.phase });
+      const resolved = resolveFormats(st.video && st.video.id, st.formats);
+      const formats = resolved.formats
+        .slice()
+        .sort((a, b) => (b.itag === 22 ? 1 : 0) - (a.itag === 22 ? 1 : 0));
+      if (!formats.length) {
+        await setState({
+          phase: "CAPTURE_FAILED",
+          formats: [],
+          error: { message: "Formato não disponível após conexão — dê play no vídeo por ~5s e reabra o painel." },
+        });
+        return sendResponse({ ok: true, phase: "CAPTURE_FAILED" });
+      }
+      await setState({
+        phase: "READY",
+        formats,
+        source: resolved.source,
+        error: null,
+        notice: null,
+        selectedQualityItag: null,
+        workspaceId: null,
+        projectId: null,
+        progress: null,
+        assetId: null,
+        startedAt: null,
+        pollInfo: null,
+      });
+      sendResponse({ ok: true, phase: "READY" });
+    })();
+    return true;
+  }
 
   if (msg.type === "UI_START") {
     startTransfer({
