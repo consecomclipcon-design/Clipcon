@@ -86,6 +86,20 @@ export function isDuplicate(
  * Seleção greedy diversificada: ordena por score e descarta duplicados
  * contra os já aceitos. Loga o motivo de cada descarte.
  */
+/**
+ * Content identity: chave determinística para um trecho de vídeo.
+ * Dois candidatos com a mesma identity representam o mesmo conteúdo.
+ */
+export function contentIdentity(
+  sourceVideoId: string,
+  start: number,
+  end: number,
+): string {
+  const startRounded = Math.round(start / 5) * 5;
+  const endRounded = Math.round(end / 5) * 5;
+  return `${sourceVideoId}:${startRounded}-${endRounded}`;
+}
+
 export function selectDiverse(
   candidates: DedupCandidate[],
   config: DedupConfig = DEFAULT_DEDUP,

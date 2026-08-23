@@ -21,7 +21,7 @@ import {
   ingestMedia,
 } from "./media.js";
 import { transcribeAudio, analyzeTranscript } from "./groq.js";
-import { selectDiverse } from "./dedup.js";
+import { selectDiverse, contentIdentity } from "./dedup.js";
 import {
   fetchYoutubeVideoMetrics,
   uploadFileToDrive,
@@ -1530,7 +1530,33 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
           .join(" "),
       };
     });
-    const diversified = selectDiverse(dedupInput);
+    // L3b: content identity — impede mesmo trecho (±5s) de ser re-processado
+    const { data: existingIdentities } = await supabase
+      .from("clips")
+      .select("candidate_id, clip_candidates(start_seconds, end_seconds)")
+      .eq("project_id", run.project_id)
+      .limit(200);
+    const usedIdentities = new Set(
+      (existingIdentities ?? [])
+        .filter((c) => c.clip_candidates)
+        .map((c) => {
+          const cc = c.clip_candidates as unknown as { start_seconds: number; end_seconds: number };
+          return contentIdentity(
+            sourceVideoId ?? "unknown",
+            Number(cc.start_seconds),
+            Number(cc.end_seconds),
+          );
+        }),
+    );
+
+    const diversified = selectDiverse(dedupInput).filter((d) => {
+      const identity = contentIdentity(sourceVideoId ?? "unknown", d.start, d.end);
+      if (usedIdentities.has(identity)) {
+        console.log(`[ClipStudio:${run.id}] SKIP: content identity já usada (${identity})`);
+        return false;
+      }
+      return true;
+    });
     const selectedScores = new Map(
       diversified.map((d) => [d.start, d.score]),
     );
