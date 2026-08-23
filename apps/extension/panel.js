@@ -321,6 +321,9 @@
         el("div", { class: "note", text: "Preparando download no navegador…" }),
       ];
     }
+    if (jobState && jobState.error) {
+      return errView(jobState.error.message, jobState.error.stage);
+    }
     if (!meta.authChecked) {
       return [el("div", { class: "note", text: "Conectando ao ClipCon…" })];
     }
@@ -386,19 +389,6 @@
       );
     }
 
-    out.push(el("label", { text: "Projeto" }));
-    const prSel = el("select");
-    if (meta.projLoading) prSel.append(el("option", { text: "Carregando…" }));
-    else if (!meta.projects.length) prSel.append(el("option", { value: "", text: "Crie um projeto no ClipCon" }));
-    else
-      for (const p of meta.projects) {
-        const o = el("option", { value: p.id, text: p.name || p.id });
-        if (p.id === meta.selectedProj) o.selected = true;
-        prSel.append(o);
-      }
-    prSel.addEventListener("change", () => (meta.selectedProj = prSel.value));
-    out.push(prSel);
-
     out.push(el("label", { text: "Qualidade" }));
     const qSel = el("select");
     let recommended = null;
@@ -426,16 +416,18 @@
       type: "button",
       text: "Baixar e enviar",
       onclick: async () => {
-        if (!meta.selectedWs || !meta.selectedProj || !meta.selectedItag) return;
+        if (!meta.selectedWs || !meta.selectedItag) return;
+        const ws = meta.workspaces.find((w) => w.id === meta.selectedWs);
         startBtn.disabled = true;
         startBtn.textContent = "Iniciando…";
         meta.pendingStart = true;
         render();
-        const r = await send({
+        await send({
           type: "UI_START",
           itag: meta.selectedItag,
           workspaceId: meta.selectedWs,
-          projectId: meta.selectedProj,
+          tenantId: ws ? ws.tenant_id : null,
+          videoTitle: (meta.video && meta.video.title) || "",
         });
         // Watchdog: se em 6s nenhum STATE mudou a fase, algo falhou silenciosamente
         setTimeout(() => {
@@ -447,7 +439,7 @@
             };
             render();
           }
-        }, 6000);
+        }, 12000);
       },
     });
     out.push(startBtn);
@@ -590,7 +582,7 @@
     if (!msg || typeof msg !== "object") return;
     if (msg.type === "STATE") {
       jobState = msg.job;
-      if (jobState && jobState.phase !== "READY" && jobState.phase !== "FORM") meta.pendingStart = false;
+      meta.pendingStart = false;
       if (jobState && jobState.phase === "READY" && Array.isArray(jobState.formats)) {
         if (jobState.video && jobState.video.id) meta.video = jobState.video;
         meta.formats = jobState.formats;

@@ -391,7 +391,41 @@ async function startFlow(payload, senderTabId) {
   notifyTab(tabId, payload && { id: videoId, title: payload.title, durationSeconds: payload.lengthSeconds })
 }
 
-async function beginTransfer(itag, workspaceId, projectId) {
+async function resolveProjectId(auth, workspaceId, tenantId, videoTitle) {
+  // 1) projeto mais recente da workspace
+  try {
+    const url =
+      `${auth.config.supabaseUrl}/rest/v1/projects?select=id,name&workspace_id=eq.${encodeURIComponent(workspaceId)}&order=created_at.desc&limit=1`;
+    const res = await fetch(url, {
+      headers: { apikey: auth.config.publishableKey, Authorization: `Bearer ${auth.token}` },
+    });
+    if (res.ok) {
+      const rows = await res.json();
+      if (Array.isArray(rows) && rows.length) return rows[0].id;
+    }
+  } catch (_) {}
+  // 2) nenhuma existe -> cria automaticamente com o titulo do vídeo
+  const c = await fetch(`${auth.config.apiUrl}/v1/projects`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${auth.token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      tenant_id: tenantId,
+      workspace_id: workspaceId,
+      name: (videoTitle || "Vídeo do YouTube").slice(0, 120),
+      strategy: "podcast",
+      clip_mode: true,
+    }),
+  });
+  const d = await c.json().catch(() => ({}));
+  if (!c.ok || !d.project?.id)
+    throw new Error(d.error || `Não foi possível criar o projeto (HTTP ${c.status})`);
+  return d.project.id;
+}
+
+async function beginTransfer(itag, workspaceId, tenantId, videoTitle) {
   try {
   const state = await getState();
   const auth = await getAuth();
@@ -410,6 +444,9 @@ async function beginTransfer(itag, workspaceId, projectId) {
     await setState({ phase: "READY", error: { stage: "start", message: "Formato selecionado não encontrado — escolha a qualidade novamente." } });
     return;
   }
+
+  await setState({ phase: "FORM", notice: "Resolvendo projeto na workspace…" });
+  const projectId = await resolveProjectId(auth, workspaceId, tenantId, videoTitle);
 
   // Guard prÃ©-flight de tamanho
   const clen = parseInt(fmt.contentLength || 0, 10);
@@ -617,7 +654,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "GET_PAGE_VIDEO") return; // tratado no content script
 
   if (msg.type === "UI_START") {
-    beginTransfer(msg.itag, msg.workspaceId, msg.projectId);
+    beginTransfer(msg.itag, msg.workspaceId, msg.tenantId, msg.videoTitle);
     sendResponse(true);
     return;
   }
