@@ -17,3 +17,5 @@ coverage/
 *.tsbuildinfo
 supabase/.temp/
 apps/extension/preauth.json
+
+private-builds/

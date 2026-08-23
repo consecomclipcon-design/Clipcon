@@ -124,6 +124,7 @@ app.addHook("onRequest", async (request, reply) => {
   if (
     request.url === "/health" ||
     request.url === "/health/deep" ||
+    request.url === "/config.js" ||
     request.url.startsWith("/v1/integrations/google/callback")
   )
     return;

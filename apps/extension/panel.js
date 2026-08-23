@@ -25,6 +25,7 @@
     selectedProj: "",
     selectedItag: null,
     authError: null,
+    authChecked: false,
   };
 
   function el(tag, attrs = {}, children = []) {
@@ -142,6 +143,7 @@
 
   async function refreshAuth() {
     const r = await send({ type: "UI_AUTH_STATUS" });
+    meta.authChecked = true;
     meta.loggedIn = !!(r && r.loggedIn);
     meta.email = r ? r.email : null;
     render();
@@ -225,6 +227,9 @@
   }
 
   function bodyChildren() {
+    if (!meta.authChecked) {
+      return [el("div", { class: "note", text: "Conectando ao ClipCon…" })];
+    }
     if (!meta.loggedIn) return loginView();
     const phase = jobState ? jobState.phase : "FORM";
     switch (phase) {
