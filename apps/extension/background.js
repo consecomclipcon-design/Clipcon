@@ -7,7 +7,7 @@ const POLL_INTERVAL_MS = 5000;
 const POLL_MAX_MS = 10 * 60 * 1000;
 
 // Ãšnico ponto de configuraÃ§Ã£o: URL da API de produÃ§Ã£o do ClipCon.
-const DEFAULT_API_URL = "https://CLIPCON-API.up.railway.app"; // TODO: substituir pela URL real
+const DEFAULT_API_URL = "https://clipcon-api-production.up.railway.app";
 
 /* ---------------- util ---------------- */
 function hexToAscii(hex) {
