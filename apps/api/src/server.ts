@@ -125,6 +125,7 @@ app.addHook("onRequest", async (request, reply) => {
     request.url === "/health" ||
     request.url === "/health/deep" ||
     request.url === "/config.js" ||
+    request.url === "/v1/extension/claim" ||
     request.url.startsWith("/v1/integrations/google/callback")
   )
     return;
@@ -148,6 +149,76 @@ app.get("/v1/me", async (request) => {
     .select("tenant_id, role, tenants(id, name, slug, status)")
     .eq("user_id", request.user!.id);
   return { profile: data, memberships: memberships ?? [] };
+});
+
+// ---- Extension pairing: one-time code -> refresh_token handoff ----
+const pairCodes = new Map<
+  string,
+  { refreshToken: string; userId: string; exp: number }
+>();
+const claimAttempts = new Map<string, { n: number; resetAt: number }>();
+
+function decodeJwt(token: string): Record<string, unknown> | null {
+  try {
+    const part = token.split(".")[1];
+    return JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+app.post("/v1/extension/pair", async (request, reply) => {
+  const body = request.body as { refresh_token?: string };
+  const refreshToken = body.refresh_token?.trim();
+  if (!refreshToken)
+    return reply.code(400).send({ error: "refresh_token is required" });
+  const payload = decodeJwt(refreshToken);
+  if (
+    !payload ||
+    payload.sub !== request.user!.id ||
+    (typeof payload.exp === "number" && payload.exp * 1000 < Date.now())
+  ) {
+    return reply.code(400).send({ error: "refresh_token does not belong to session user" });
+  }
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "CC-";
+  for (let i = 0; i < 8; i++)
+    code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  // limpa expirados para o map não crescer sem limite
+  const now = Date.now();
+  for (const [k, v] of pairCodes) if (v.exp < now) pairCodes.delete(k);
+  pairCodes.set(code, {
+    refreshToken,
+    userId: request.user!.id,
+    exp: now + 5 * 60_000,
+  });
+  return { code };
+});
+
+app.post("/v1/extension/claim", async (request, reply) => {
+  const ip =
+    (request.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
+    request.ip ||
+    "unknown";
+  const now = Date.now();
+  let bucket = claimAttempts.get(ip);
+  if (!bucket || bucket.resetAt < now) {
+    bucket = { n: 0, resetAt: now + 60_000 };
+    claimAttempts.set(ip, bucket);
+  }
+  bucket.n += 1;
+  if (bucket.n > 20)
+    return reply.code(429).send({ error: "Too many attempts" });
+
+  const body = request.body as { code?: string };
+  const code = body.code?.trim().toUpperCase();
+  const entry = code ? pairCodes.get(code) : undefined;
+  if (!entry || entry.exp < now) {
+    if (code) pairCodes.delete(code);
+    return reply.code(404).send({ error: "Código inválido ou expirado" });
+  }
+  pairCodes.delete(code!);
+  return { refresh_token: entry.refreshToken };
 });
 
 async function hasTenantMembership(userId: string, tenantId: string) {

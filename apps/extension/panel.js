@@ -146,8 +146,30 @@
     meta.authChecked = true;
     meta.loggedIn = !!(r && r.loggedIn);
     meta.email = r ? r.email : null;
+    if (!meta.loggedIn) {
+      const paired = await tryClipboardPair();
+      if (paired) {
+        meta.loggedIn = true;
+        meta.email = paired.email || null;
+        meta.authError = null;
+      }
+    }
     render();
     if (meta.loggedIn && !meta.workspaces.length) await loadWorkspaces();
+  }
+
+  let pairAttemptedThisOpen = false;
+  async function tryClipboardPair() {
+    if (pairAttemptedThisOpen) return null;
+    pairAttemptedThisOpen = true;
+    try {
+      const text = await navigator.clipboard.readText();
+      const m = /^CC-[A-Z2-9]{8}$/.exec((text || "").trim().toUpperCase());
+      if (!m) return null;
+      return await send({ type: "UI_PAIR", code: m[0] });
+    } catch (_) {
+      return null; // sem permissao ou clipboard vazio -> login manual
+    }
   }
 
   async function loadWorkspaces() {
@@ -206,7 +228,10 @@
     return [
       el("div", { class: "vid" }, [
         el("strong", { text: "Conectar ao ClipCon" }),
-        el("span", { text: "Faça login uma vez — a sessão fica salva." }),
+        el("span", {
+          text:
+            'No ClipCon, clique em "🔗 Conectar extensão" e abra um vídeo aqui — conecta sozinho. Ou entre abaixo (uma única vez).',
+        }),
       ]),
       email,
       pass,

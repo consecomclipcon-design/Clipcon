@@ -235,6 +235,37 @@ async function getAuth() {
   }
 }
 
+async function pairWithCode(code) {
+  let config;
+  try {
+    config = await getConfig();
+  } catch (e) {
+    return { ok: false, error: "API indisponivel: " + e.message };
+  }
+  try {
+    const res = await fetch(`${config.apiUrl}/v1/extension/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      return { ok: false, error: j.error || `HTTP ${res.status}` };
+    }
+    const d = await res.json();
+    if (!d.refresh_token) return { ok: false, error: "resposta sem refresh_token" };
+    // Sessao minima; getAuth() faz o refresh grant e completa os campos.
+    await chrome.storage.local.set({
+      session: { refresh_token: d.refresh_token, expires_at: 0 },
+    });
+    const auth = await getAuth();
+    if (!auth) return { ok: false, error: "token recebido mas sessao nao validou" };
+    return { ok: true, email: auth.session.email || null };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 async function loginWithPassword(email, password) {
   let config;
   try {
@@ -598,6 +629,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg.type === "UI_LOGIN") {
     loginWithPassword(String(msg.email || ""), String(msg.password || "")).then(sendResponse);
+    return true;
+  }
+  if (msg.type === "UI_PAIR") {
+    pairWithCode(String(msg.code || "").trim()).then(sendResponse);
     return true;
   }
   if (msg.type === "UI_LIST_WORKSPACES") {

@@ -264,6 +264,31 @@ function App() {
       },
     });
   }
+
+  async function pairExtension() {
+    try {
+      const current = sessionRef.current;
+      if (!current?.refresh_token) throw new Error("Sessão sem refresh token");
+      const res = await authFetch("/v1/extension/pair", {
+        method: "POST",
+        body: JSON.stringify({ refresh_token: current.refresh_token }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { code } = (await res.json()) as { code: string };
+      await navigator.clipboard.writeText(code);
+      setToast({
+        title: "Código copiado!",
+        message: `Abra um vídeo no YouTube — a extensão conecta sozinha (${code}). Válido por 5 min.`,
+      } as Notification);
+      window.setTimeout(() => setToast(null), 7000);
+    } catch (e) {
+      setToast({
+        title: "Falha ao parear",
+        message: e instanceof Error ? e.message : "erro inesperado",
+      } as Notification);
+      window.setTimeout(() => setToast(null), 7000);
+    }
+  }
   async function loadProjects() {
     if (!tenant) return;
     const cached = projectCache.get(tenant.id);
@@ -569,6 +594,9 @@ function App() {
           >
             ⬇ Baixar extensão
           </a>
+          <button className="extension-pair" onClick={pairExtension} type="button">
+            🔗 Conectar extensão
+          </button>
           <span className="extension-version">v{extVersion}</span>
         </div>
         <div className="sidebar-bottom">
