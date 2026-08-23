@@ -331,6 +331,39 @@ function resolveFormats(videoId, progressiveFormats) {
   return { formats, source };
 }
 
+/* ---------------- canal de START via storage (à prova de falha de entrega) ---------------- */
+let startLock = false;
+let processedStartTs = 0;
+
+async function handleStartRequest(req) {
+  if (!req || !req.ts || req.ts <= processedStartTs) return;
+  if (startLock) {
+    await chrome.storage.local.set({ startResult: { ts: req.ts, ok: false, error: "Já existe uma transferência iniciando." } });
+    return;
+  }
+  processedStartTs = req.ts;
+  startLock = true;
+  await chrome.storage.local.remove("startRequest");
+  console.log("[clipcon] processando startRequest", req);
+  const res = await startTransfer(req);
+  console.log("[clipcon] startTransfer ->", JSON.stringify(res));
+  startLock = false;
+  await chrome.storage.local.set({ startResult: { ts: req.ts, ...res } });
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes.startRequest) return;
+  handleStartRequest(changes.startRequest.newValue);
+});
+
+// Recupera comandos que ficaram pendentes se o SW estava morto na escrita
+(async () => {
+  try {
+    const { startRequest } = await chrome.storage.local.get("startRequest");
+    if (startRequest) await handleStartRequest(startRequest);
+  } catch (_) {}
+})();
+
 async function startFlow(payload, senderTabId) {
   const tabId = senderTabId;
   const videoId = payload ? payload.videoId : undefined;
@@ -714,12 +747,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "UI_START") {
+    console.log("[clipcon] UI_START recebido via runtime", msg);
     startTransfer({
       itag: msg.itag,
       workspaceId: msg.workspaceId,
       tenantId: msg.tenantId,
       videoTitle: msg.videoTitle,
-    }).then(sendResponse);
+      ts: Date.now(),
+    }).then((res) => console.log("[clipcon] UI_START resultado:", JSON.stringify(res)));
+    // Resposta opcional — o canal storage é o caminho garantido
+    sendResponse({ ok: true, via: "runtime" });
     return true;
   }
   if (msg.type === "UI_CANCEL") {

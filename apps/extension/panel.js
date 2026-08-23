@@ -429,34 +429,51 @@
         startBtn.textContent = "Iniciando…";
         meta.pendingStart = true;
         render();
-        const r = await send({
-          type: "UI_START",
-          itag: meta.selectedItag,
-          workspaceId: meta.selectedWs,
-          tenantId: ws ? ws.tenant_id : null,
-          videoTitle: (meta.video && meta.video.title) || "",
+        // Canal garantido: comando gravado no chrome.storage acorda o service worker
+        const reqTs = Date.now();
+        await new Promise((resolve) => {
+          chrome.storage.local.set(
+            {
+              startRequest: {
+                itag: meta.selectedItag,
+                workspaceId: meta.selectedWs,
+                tenantId: ws ? ws.tenant_id : null,
+                videoTitle: (meta.video && meta.video.title) || "",
+                ts: reqTs,
+              },
+            },
+            () => resolve()
+          );
         });
-        if (r && r.ok === false) {
-          // Falha concreta do background — mostra o motivo exato na hora
+
+        // Aguarda o resultado escrito pelo background
+        const deadline = Date.now() + 20000;
+        let answered = false;
+        while (Date.now() < deadline && !answered) {
+          await new Promise((r) => setTimeout(r, 400));
+          if (!meta.pendingStart) return; // um STATE já mudou a fase
+          const { startResult } = await chrome.storage.local.get("startResult");
+          if (startResult && startResult.ts === reqTs) {
+            answered = true;
+            meta.pendingStart = false;
+            if (startResult.ok === false) {
+              jobState = {
+                phase: "ERROR",
+                error: { stage: "start", message: startResult.error },
+              };
+              render();
+            }
+            return;
+          }
+        }
+        if (!answered && meta.pendingStart) {
           meta.pendingStart = false;
           jobState = {
             phase: "ERROR",
-            error: { stage: "start", message: r.error },
+            error: { stage: "start", message: "Tempo excedido ao iniciar (20s). Tente novamente." },
           };
           render();
-          return;
         }
-        // Watchdog de segurança: nenhum STATE em 12s
-        setTimeout(() => {
-          if (meta.pendingStart) {
-            meta.pendingStart = false;
-            jobState = {
-              phase: "ERROR",
-              error: { stage: "start", message: "A extensão não respondeu após iniciar. Abra chrome://extensions → ClipCon Ingest → service worker e me mande o erro em vermelho." },
-            };
-            render();
-          }
-        }, 12000);
       },
     });
     out.push(startBtn);
