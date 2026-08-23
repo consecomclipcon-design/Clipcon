@@ -329,6 +329,14 @@
     }
     if (!meta.loggedIn) return loginView();
     const phase = jobState ? jobState.phase : "FORM";
+    if (phase === "STARTING") {
+      return [
+        el("div", { class: "phase-tag", text: "⟳ Preparando envio…" }),
+        track(0),
+        ...videoBlock(jobState.video),
+        el("div", { class: "note", text: jobState.notice || "Resolvendo projeto na workspace…" }),
+      ];
+    }
     switch (phase) {
       case "DOWNLOADING":
       case "UPLOADING":
@@ -422,20 +430,30 @@
         startBtn.textContent = "Iniciando…";
         meta.pendingStart = true;
         render();
-        await send({
+        const r = await send({
           type: "UI_START",
           itag: meta.selectedItag,
           workspaceId: meta.selectedWs,
           tenantId: ws ? ws.tenant_id : null,
           videoTitle: (meta.video && meta.video.title) || "",
         });
-        // Watchdog: se em 6s nenhum STATE mudou a fase, algo falhou silenciosamente
+        if (r && r.ok === false) {
+          // Falha concreta do background — mostra o motivo exato na hora
+          meta.pendingStart = false;
+          jobState = {
+            phase: "ERROR",
+            error: { stage: "start", message: r.error },
+          };
+          render();
+          return;
+        }
+        // Watchdog de segurança: nenhum STATE em 12s
         setTimeout(() => {
           if (meta.pendingStart) {
             meta.pendingStart = false;
             jobState = {
               phase: "ERROR",
-              error: { stage: "start", message: "A extensão não respondeu ao iniciar. Verifique se o service worker está ativo e tente novamente." },
+              error: { stage: "start", message: "A extensão não respondeu após iniciar. Abra chrome://extensions → ClipCon Ingest → service worker e me mande o erro em vermelho." },
             };
             render();
           }

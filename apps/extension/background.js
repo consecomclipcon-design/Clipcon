@@ -425,79 +425,75 @@ async function resolveProjectId(auth, workspaceId, tenantId, videoTitle) {
   return d.project.id;
 }
 
-async function beginTransfer(itag, workspaceId, tenantId, videoTitle) {
+async function startTransfer(params) {
+  const { itag, workspaceId, tenantId, videoTitle } = params;
+  let state, auth, fmt, projectId, filename, clen;
   try {
-  const state = await getState();
-  const auth = await getAuth();
-  if (!state) {
-    await setState({ phase: "ERROR", error: { stage: "start", message: "Estado interno perdido — reabra o painel e tente de novo." } });
-    badge("!", "#dc2626");
-    return;
-  }
-  if (!auth) {
-    await setState({ phase: "NEED_LOGIN", error: { message: "Sessão expirada — clique em Conectar extensão novamente." } });
-    return;
-  }
+    state = await getState();
+    auth = await getAuth();
+    if (!state)
+      return { ok: false, error: "Estado interno perdido — feche o painel e abra o vídeo novamente." };
+    if (!auth)
+      return { ok: false, error: "Sessão expirada — clique em 🔗 Conectar extensão no ClipCon novamente." };
 
-  const fmt = state.formats.find((f) => f.itag === itag);
-  if (!fmt || !fmt.url) {
-    await setState({ phase: "READY", error: { stage: "start", message: "Formato selecionado não encontrado — escolha a qualidade novamente." } });
-    return;
-  }
+    fmt = state.formats.find((f) => f.itag === itag);
+    if (!fmt || !fmt.url)
+      return { ok: false, error: "Formato não encontrado — escolha a qualidade novamente." };
 
-  await setState({ phase: "FORM", notice: "Resolvendo projeto na workspace…" });
-  const projectId = await resolveProjectId(auth, workspaceId, tenantId, videoTitle);
+    clen = parseInt(fmt.contentLength || 0, 10);
+    if (clen > SAFE_MAX_BYTES)
+      return {
+        ok: false,
+        error: `Este vídeo em ${fmt.qualityLabel} tem ~${(clen / 1048576).toFixed(0)}MB e passa do limite da API (${(SAFE_MAX_BYTES / 1048576).toFixed(0)}MB) — escolha uma qualidade menor.`,
+      };
 
-  // Guard prÃ©-flight de tamanho
-  const clen = parseInt(fmt.contentLength || 0, 10);
-  if (clen > SAFE_MAX_BYTES) {
     await setState({
-      phase: "READY",
-      error: {
-        message: `Este vÃ­deo em ${fmt.qualityLabel} tem ~${(clen / 1048576).toFixed(0)}MB e passa do limite seguro da API (${(SAFE_MAX_BYTES / 1048576).toFixed(0)}MB). Selecione uma qualidade menor.`,
+      phase: "STARTING",
+      selectedQualityItag: itag,
+      workspaceId,
+      tenantId,
+      videoTitle,
+      projectId: null,
+      error: null,
+      notice: null,
+      startedAt: Date.now(),
+      progress: { phase: "download", received: 0, total: clen },
+    });
+
+    await setState({ notice: "Resolvendo projeto na workspace…" });
+    projectId = await resolveProjectId(auth, workspaceId, tenantId, videoTitle);
+
+    const safeTitle = String(state.video.title)
+      .replace(/[^\w\s.-]/g, "")
+      .trim()
+      .slice(0, 120)
+      .replace(/\s+/g, "-");
+    filename = `${safeTitle || "video"}-${state.video.id}.mp4`;
+
+    await setState({ projectId, filename, notice: null });
+    badge("%", "#2563eb");
+    await ensureOffscreen();
+    chrome.runtime.sendMessage({
+      type: "ENGINE_START",
+      job: {
+        jobId: `${Date.now()}`,
+        url: fmt.url,
+        clen,
+        filename,
+        apiUrl: auth.config.apiUrl,
+        projectId,
+        token: auth.token,
       },
     });
-    return;
-  }
-
-  const safeTitle = String(state.video.title)
-    .replace(/[^\w\s.-]/g, "")
-    .trim()
-    .slice(0, 120)
-    .replace(/\s+/g, "-");
-  const filename = `${safeTitle || "video"}-${state.video.id}.mp4`;
-
-  await setState({
-    phase: "DOWNLOADING",
-    selectedQualityItag: itag,
-    workspaceId,
-    projectId,
-    filename,
-    error: null,
-    notice: null,
-    startedAt: Date.now(),
-    progress: { phase: "download", received: 0, total: clen },
-  });
-  badge("%", "#2563eb");
-  await ensureOffscreen();
-  chrome.runtime.sendMessage({
-    type: "ENGINE_START",
-    job: {
-      jobId: `${Date.now()}`,
-      url: fmt.url,
-      clen,
-      filename,
-      apiUrl: auth.config.apiUrl,
-      projectId,
-      token: auth.token,
-    },
-  });
+    return { ok: true };
   } catch (err) {
+    const message = err && err.message ? err.message : String(err);
     await setState({
       phase: "ERROR",
-      error: { stage: "start", message: "Falha ao iniciar: " + (err && err.message ? err.message : String(err)) },
+      error: { stage: "start", message: "Falha ao iniciar: " + message },
     });
     badge("!", "#dc2626");
+    return { ok: false, error: message };
   }
 }
 
@@ -524,11 +520,12 @@ async function retryFromError() {
     return;
   }
   if (stage === "upload" || stage === "download") {
-    await beginTransfer(
-      state.selectedQualityItag,
-      state.workspaceId,
-      state.projectId
-    );
+    await startTransfer({
+      itag: state.selectedQualityItag,
+      workspaceId: state.workspaceId,
+      tenantId: state.tenantId,
+      videoTitle: state.videoTitle,
+    });
     return;
   }
   if (stage === "poll") {
@@ -654,9 +651,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "GET_PAGE_VIDEO") return; // tratado no content script
 
   if (msg.type === "UI_START") {
-    beginTransfer(msg.itag, msg.workspaceId, msg.tenantId, msg.videoTitle);
-    sendResponse(true);
-    return;
+    startTransfer({
+      itag: msg.itag,
+      workspaceId: msg.workspaceId,
+      tenantId: msg.tenantId,
+      videoTitle: msg.videoTitle,
+    }).then(sendResponse);
+    return true;
   }
   if (msg.type === "UI_CANCEL") {
     cancelTransfer();
