@@ -1,11 +1,32 @@
 "$schema" = "https://railway.com/railway.schema.json"
 
-[build]
-builder = "DOCKERFILE"
+[[services]]
+name = "Clipcon-api"
 dockerfilePath = "Dockerfile"
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
 
-[deploy]
-startCommand = "./railway-entrypoint.sh"
+[[services]]
+name = "Clipcon-web"
+dockerfilePath = "Dockerfile.web"
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[[services]]
+name = "Clipcon-worker"
+dockerfilePath = "Dockerfile.worker"
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+
+[[services]]
+name = "Clipcon-pot-provider"
+dockerfilePath = "apps/pot-provider/Dockerfile"
 healthcheckPath = "/health"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"

@@ -449,7 +449,7 @@ function App() {
           </label>
           {error && <div className="error">{error}</div>}
           <button type="submit">
-            Entrar no workspace <span>â†—</span>
+            Entrar no workspace <span>↗</span>
           </button>
         </form>
       </main>
@@ -475,7 +475,7 @@ function App() {
           </label>
           {error && <div className="error">{error}</div>}
           <button type="submit">
-            Salvar nova senha <span>â†—</span>
+            Salvar nova senha <span>↗</span>
           </button>
         </form>
       </main>
@@ -510,7 +510,7 @@ function App() {
           </label>
           {error && <div className="error">{error}</div>}
           <button disabled={busy} type="submit">
-            Criar workspace <span>â†—</span>
+            Criar workspace <span>↗</span>
           </button>
         </form>
       </main>
@@ -524,28 +524,28 @@ function App() {
         </div>
         <div className="product-tabs">
           <button className={productTab === "clips" ? "active" : ""} onClick={() => { setProductTab("clips"); setView("home"); }}>
-            â—ˆ Clips
+            ◈ Clips
           </button>
           <button className={productTab === "editor" ? "active" : ""} onClick={() => { setProductTab("editor"); setView("editor"); }}>
-            âœ‚ Editor de vídeos
+            ✂ Editor de vídeos
           </button>
         </div>
         {productTab === "clips" ? (
           <>
             <div className="side-label">CLIPS</div>
-            <Nav active={view} onClick={setView} icon="âŒ‚" label="Workspace de clips" value="home" />
+            <Nav active={view} onClick={setView} icon="⌂" label="Workspace de clips" value="home" />
             <Nav active={view} onClick={setView} icon="✔" label="Revisão" value="approvals" />
-            <Nav active={view} onClick={setView} icon="â†—" label="Performance" value="performance" />
+            <Nav active={view} onClick={setView} icon="↗" label="Performance" value="performance" />
           </>
         ) : (
           <>
             <div className="side-label">EDITOR DE VÍDEOS</div>
-            <Nav active={view} onClick={setView} icon="ï¼‹" label="Abrir editor" value="editor" />
+            <Nav active={view} onClick={setView} icon="+" label="Abrir editor" value="editor" />
           </>
         )}
         <div className="side-label system-label">SISTEMA</div>
-        <Nav active={view} onClick={setView} icon="â—Ž" label="Integrações" value="settings" />
-        <Nav active={view} onClick={setView} icon="â—‡" label="AI Providers" value="ai-providers" />
+        <Nav active={view} onClick={setView} icon="◔" label="Integrações" value="settings" />
+        <Nav active={view} onClick={setView} icon="◇" label="AI Providers" value="ai-providers" />
         <div className="sidebar-bottom">
           <span className="workspace-dot" />
           {tenant.name}
@@ -554,7 +554,7 @@ function App() {
             onClick={() => setShowWorkspaceForm((value) => !value)}
             title="Criar novo workspace"
           >
-            ï¼‹ Nova
+            + Nova
           </button>
           <button className="logout" onClick={signOut}>
             Sair
@@ -713,27 +713,27 @@ function Home({
           <p>Escolha um ambiente e leve seu conteúdo para o próximo nível.</p>
         </div>
         <button onClick={onCreate}>
-          Novo projeto <span>ï¼‹</span>
+          Novo projeto <span>+</span>
         </button>
       </div>
       <div className="choice-grid">
         <button className="choice-card primary" onClick={onCreate}>
-          <span className="choice-icon">â—ˆ</span>
+          <span className="choice-icon">◈</span>
           <strong>Criar Clipes</strong>
           <p>
             Transforme vídeos longos em Shorts com análise, seleção e publicação
             assistidas por IA.
           </p>
-          <span className="choice-link">Começar agora â†—</span>
+          <span className="choice-link">Começar agora ↗</span>
         </button>
         <button className="choice-card" onClick={() => onNavigate("editor")}>
-          <span className="choice-icon">âœ‚</span>
+          <span className="choice-icon">✂</span>
           <strong>Editar Vídeo</strong>
           <p>
             Organize uma edição manual ou prepare o material para receber ajuda
             da IA.
           </p>
-          <span className="choice-link">Abrir editor â†—</span>
+          <span className="choice-link">Abrir editor ↗</span>
         </button>
       </div>
       <div className="stats-row">
@@ -757,7 +757,7 @@ function Home({
             <h2>Seus últimos clipes</h2>
           </div>
           <button className="text-button" onClick={() => onNavigate("clips")}>
-            Ver biblioteca â†—
+            Ver biblioteca ↗
           </button>
         </div>
         {clips.length ? (
@@ -778,7 +778,7 @@ function Home({
               momentos que merecem continuar.
             </p>
             <button onClick={onCreate}>
-              Adicionar fonte <span>ï¼‹</span>
+              Adicionar fonte <span>+</span>
             </button>
           </div>
         )}
@@ -814,7 +814,7 @@ function ClipsView({
           </p>
         </div>
         <button onClick={onCreate}>
-          Novo projeto <span>ï¼‹</span>
+          Novo projeto <span>+</span>
         </button>
       </div>
       <div className="toolbar">
@@ -842,7 +842,7 @@ function ClipsView({
           <strong>Nenhum clipe gerado ainda.</strong>
           <p>Crie um projeto para iniciar o pipeline.</p>
           <button onClick={onCreate}>
-            Criar projeto <span>ï¼‹</span>
+            Criar projeto <span>+</span>
           </button>
         </div>
       )}
@@ -873,7 +873,7 @@ function ClipCard({ clip, onClick }: { clip: Clip; onClick: () => void }) {
         <small>{clip.candidate?.category ?? "Análise ClipCon"}</small>
         <div className="clip-meta">
           <span>
-            â—‰ {Number(clip.performance?.views ?? 0).toLocaleString("pt-BR")}
+            ◉ {Number(clip.performance?.views ?? 0).toLocaleString("pt-BR")}
           </span>
           <span>
             Score{" "}
@@ -915,17 +915,17 @@ function PerformanceView({
       <div className="stats-row performance-stats">
         <Stat
           label="Views totais"
-          value={m?.totalViews?.toLocaleString("pt-BR") ?? "â€”"}
+          value={m?.totalViews?.toLocaleString("pt-BR") ?? "—"}
         />
         <Stat
           label="Inscritos gerados"
-          value={m?.subscribersGained?.toLocaleString("pt-BR") ?? "â€”"}
+          value={m?.subscribersGained?.toLocaleString("pt-BR") ?? "—"}
         />
         <Stat
           label="Score médio"
-          value={m?.averageScore ? Math.round(m.averageScore) : "â€”"}
+          value={m?.averageScore ? Math.round(m.averageScore) : "—"}
         />
-        <Stat label="Publicados" value={m?.published ?? "â€”"} />
+        <Stat label="Publicados" value={m?.published ?? "—"} />
       </div>
       <div className="insight-layout">
         <div className="card insight-card">
@@ -953,7 +953,7 @@ function PerformanceView({
           )}
         </div>
         <div className="card explain-card">
-          <span className="eyebrow">MÃ‰TODO</span>
+          <span className="eyebrow">MÉTODO</span>
           <h2>Não é só view.</h2>
           <p>
             O score futuro combina retenção, engagement, conversão em inscritos
@@ -1014,23 +1014,23 @@ function EditorView({
       <div className="editor-frame card">
         <aside className="editor-tools">
           <strong>Ferramentas</strong>
-          <span>â—« Mídia</span>
+          <span>▫ Mídia</span>
           <span>
-            âœ‚ Cortar <em>em breve</em>
+            ✂ Cortar <em>em breve</em>
           </span>
           <span>
             T Texto <em>em breve</em>
           </span>
           <span>
-            â™¬ Áudio <em>em breve</em>
+            ♬ Áudio <em>em breve</em>
           </span>
           <span>
-            âœ¦ IA <em>em breve</em>
+            ✦ IA <em>em breve</em>
           </span>
         </aside>
         <div className="editor-canvas">
           <div className="canvas-empty">
-            <span>â—Œ</span>
+            <span>▪</span>
             <strong>Selecione uma mídia para começar</strong>
             <p>
               Preview e timeline serão habilitados quando o projeto de edição
@@ -1091,7 +1091,7 @@ function Settings({
           return (
             <div className="integration-card card" key={provider}>
               <span className="integration-symbol">
-                {provider === "drive" ? "â–¤" : "â–¶"}
+                {provider === "drive" ? "▤" : "▶"}
               </span>
               <div>
                 <span className="eyebrow">
@@ -1109,7 +1109,7 @@ function Settings({
                   connected ? onDisconnect(provider) : onConnect(provider)
                 }
               >
-                {connected ? "Desconectar" : "Conectar"} <span>â†—</span>
+                {connected ? "Desconectar" : "Conectar"} <span>↗</span>
               </button>
             </div>
           );
@@ -1150,7 +1150,7 @@ function ProjectModal({
             <h2>Começar com uma fonte</h2>
           </div>
           <button type="button" className="icon-button" onClick={onClose}>
-            Ã—
+            ×
           </button>
         </div>
         <label>
@@ -1195,7 +1195,7 @@ function ProjectModal({
         </p>
         {error && <div className="error">{error}</div>}
         <button disabled={busy} type="submit">
-          {busy ? "Enfileirando..." : "Enfileirar processamento"} <span>â†—</span>
+          {busy ? "Enfileirando..." : "Enfileirar processamento"} <span>↗</span>
         </button>
       </form>
     </div>
@@ -1244,14 +1244,14 @@ function ClipPanel({
     <div className="modal-backdrop">
       <section className="clip-panel">
         <button className="close-panel" onClick={onClose}>
-          Ã—
+          ×
         </button>
         <div className="preview-placeholder">
           {videoUrl ? (
             <video controls autoPlay src={videoUrl} />
           ) : (
             <>
-              <span>â–¶</span>
+              <span>▶</span>
               <p>Preview do clipe</p>
               <small>
                 O preview aparece quando o arquivo estiver no Drive.
@@ -1268,11 +1268,11 @@ function ClipPanel({
                 ? `${Math.round(clip.duration_seconds)}s`
                 : "Duração pendente"}
             </span>
-            <span>Score {clip.candidate?.score ?? "â€”"}</span>
+            <span>Score {clip.candidate?.score ?? "—"}</span>
             <span>{clip.status}</span>
           </div>
           <p className="hook">
-            â€œ
+            “
             {clip.candidate?.hook ??
               "Hook registrado pela análise aparecerá aqui."}
             ⬝
@@ -1284,13 +1284,13 @@ function ClipPanel({
                 className={rating === 1 ? "selected" : ""}
                 onClick={() => setRating(1)}
               >
-                ðŸ‘ Gostei
+                👍 Gostei
               </button>
               <button
                 className={rating === -1 ? "selected negative" : ""}
                 onClick={() => setRating(-1)}
               >
-                ðŸ‘Ž Não gostei
+                👍Ž Não gostei
               </button>
             </div>
             <textarea
@@ -1299,7 +1299,7 @@ function ClipPanel({
               placeholder="O começo ficou lento? O conflito funcionou? Diga à IA o que aprender."
             />
             <button disabled={!rating} onClick={save}>
-              {saved ? "Feedback salvo" : "Salvar feedback"} <span>â†—</span>
+              {saved ? "Feedback salvo" : "Salvar feedback"} <span>↗</span>
             </button>
           </div>
         </div>

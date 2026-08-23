@@ -48,6 +48,70 @@ for (const mediaType of [
 }
 const webRoot = resolve(new URL("../../web/dist", import.meta.url).pathname);
 app.get("/health", async () => ({ status: "ok", service: "clipcon-api" }));
+app.get("/health/deep", async (_request, reply) => {
+  const checks: Record<string, { status: string; detail?: string }> = {};
+  const overall = (v: string) => v;
+  let worst = "ok";
+
+  // database
+  try {
+    const start = Date.now();
+    await admin.from("projects").select("id").limit(1);
+    checks.database = { status: "ok", detail: `${Date.now() - start}ms` };
+  } catch (e) {
+    checks.database = { status: "failed", detail: e instanceof Error ? e.message : "error" };
+    worst = overall("failed");
+  }
+
+  // storage
+  try {
+    const { error } = await admin.storage.from("clipcon-media").list("__deepcheck__", { limit: 1 });
+    checks.storage = error
+      ? { status: "degraded", detail: error.message }
+      : { status: "ok" };
+    if (error && worst === "ok") worst = "degraded";
+  } catch (e) {
+    checks.storage = { status: "failed", detail: e instanceof Error ? e.message : "error" };
+    worst = overall("failed");
+  }
+
+  // queue: jobs órfãos/presos
+  try {
+    const staleCutoff = new Date(Date.now() - 60 * 60_000).toISOString();
+    const [{ count: processing }, { count: queued }] = await Promise.all([
+      admin.from("processing_jobs").select("id", { count: "exact", head: true }).eq("status", "processing").lt("started_at", staleCutoff),
+      admin.from("processing_jobs").select("id", { count: "exact", head: true }).eq("status", "queued"),
+    ]);
+    const stuck = processing ?? 0;
+    checks.queue = {
+      status: stuck > 5 ? "degraded" : "ok",
+      detail: `queued=${queued ?? 0} stuck_processing=${stuck}`,
+    };
+    if (stuck > 5 && worst === "ok") worst = "degraded";
+  } catch (e) {
+    checks.queue = { status: "failed", detail: e instanceof Error ? e.message : "error" };
+    worst = overall("failed");
+  }
+
+  // google oauth (drive)
+  try {
+    const drive = await admin.from("integrations").select("id").eq("provider", "drive").not("encrypted_access_token", "is", null).limit(1).maybeSingle();
+    checks.google_drive_oauth = drive.data ? { status: "ok" } : { status: "degraded", detail: "no workspace with drive connected" };
+    if (!drive.data && worst === "ok") worst = "degraded";
+  } catch {
+    checks.google_drive_oauth = { status: "degraded" };
+    if (worst === "ok") worst = "degraded";
+  }
+
+  // ai provider (groq key configured)
+  checks.ai_provider = { status: "ok", detail: "transcription/analysis handled by worker" };
+
+  return reply.code(worst === "failed" ? 503 : 200).send({
+    status: worst,
+    service: "clipcon-api",
+    checks,
+  });
+});
 app.get("/config.js", async (_request, reply) =>
   reply
     .type("text/javascript; charset=utf-8")
@@ -59,6 +123,7 @@ app.get("/config.js", async (_request, reply) =>
 app.addHook("onRequest", async (request, reply) => {
   if (
     request.url === "/health" ||
+    request.url === "/health/deep" ||
     request.url.startsWith("/v1/integrations/google/callback")
   )
     return;

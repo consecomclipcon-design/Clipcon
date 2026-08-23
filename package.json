@@ -13,5 +13,12 @@
     "test": "npm run test --workspaces",
     "bootstrap:master": "npm --workspace apps/api run bootstrap:master"
   },
-  "workspaces": ["apps/web", "apps/api", "apps/worker"]
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "apps/worker"
+  ],
+  "devDependencies": {
+    "supabase": "^2.115.0"
+  }
 }

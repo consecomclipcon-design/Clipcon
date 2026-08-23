@@ -37,10 +37,10 @@ export function decryptToken(value: string) {
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
 }
 
-export type OAuthState = { userId: string; tenantId: string; provider: GoogleProvider; expiresAt: number };
+export type OAuthState = { userId: string; tenantId: string; workspaceId: string; provider: GoogleProvider; expiresAt: number };
 
-export function signOAuthState(userId: string, tenantId: string, provider: GoogleProvider) {
-  const payload = Buffer.from(JSON.stringify({ userId, tenantId, provider, expiresAt: Date.now() + 10 * 60_000 })).toString('base64url');
+export function signOAuthState(userId: string, tenantId: string, workspaceId: string, provider: GoogleProvider) {
+  const payload = Buffer.from(JSON.stringify({ userId, tenantId, workspaceId, provider, expiresAt: Date.now() + 10 * 60_000 })).toString('base64url');
   const signature = crypto.createHmac('sha256', config.APP_SECRET).update(payload).digest('base64url');
   return `${payload}.${signature}`;
 }
@@ -90,8 +90,10 @@ export async function fetchAccountLabel(provider: GoogleProvider, accessToken: s
   return { email: null, label: null, type: null };
 }
 
-export async function getStoredToken(tenantId: string, provider: GoogleProvider) {
-  const { data } = await admin.from('integrations').select('encrypted_access_token, encrypted_refresh_token, token_expires_at').eq('tenant_id', tenantId).eq('provider', provider).maybeSingle();
+export async function getStoredToken(tenantId: string, provider: GoogleProvider, workspaceId?: string) {
+  let query = admin.from('integrations').select('encrypted_access_token, encrypted_refresh_token, token_expires_at').eq('tenant_id', tenantId).eq('provider', provider);
+  if (workspaceId) query = query.eq('workspace_id', workspaceId);
+  const { data } = await query.maybeSingle();
   if (!data?.encrypted_access_token) return null;
   const accessToken = decryptToken(data.encrypted_access_token);
   const refreshToken = data.encrypted_refresh_token ? decryptToken(data.encrypted_refresh_token) : null;
@@ -102,7 +104,9 @@ export async function getStoredToken(tenantId: string, provider: GoogleProvider)
       client.setCredentials({ refresh_token: refreshToken });
       const { credentials } = await client.refreshAccessToken();
       if (credentials.access_token) {
-        await admin.from('integrations').update({ encrypted_access_token: encryptToken(credentials.access_token), token_expires_at: credentials.expiry_date ? new Date(credentials.expiry_date).toISOString() : null, updated_at: new Date().toISOString() }).eq('tenant_id', tenantId).eq('provider', provider);
+        const refreshQuery = admin.from('integrations').update({ encrypted_access_token: encryptToken(credentials.access_token), token_expires_at: credentials.expiry_date ? new Date(credentials.expiry_date).toISOString() : null, updated_at: new Date().toISOString() }).eq('tenant_id', tenantId).eq('provider', provider);
+        if (workspaceId) refreshQuery.eq('workspace_id', workspaceId);
+        await refreshQuery;
         return credentials.access_token;
       }
     } catch { /* keep current access token */ }
@@ -120,4 +124,30 @@ export async function createProjectDriveStructure(accessToken: string, projectNa
   const names = ['Source', 'Audio', 'Transcription', 'Clips', 'Metadata', 'Published'];
   const folders = Object.fromEntries(await Promise.all(names.map(async name => [name, await makeFolder(name, project)])));
   return { project, folders };
+}
+
+export async function listDriveFolders(accessToken: string, search = "") {
+  const auth = createGoogleClient();
+  auth.setCredentials({ access_token: accessToken });
+  const drive = google.drive({ version: "v3", auth });
+  const escaped = search.replace(/'/g, "\\'");
+  const nameFilter = escaped ? ` and name contains '${escaped}'` : "";
+  const response = await drive.files.list({
+    q: `mimeType = 'application/vnd.google-apps.folder' and trashed = false${nameFilter}`,
+    fields: "files(id,name,parents,webViewLink)",
+    orderBy: "name",
+    pageSize: 100,
+  });
+  return response.data.files ?? [];
+}
+
+export async function createDriveFolder(accessToken: string, name: string, parentId?: string) {
+  const auth = createGoogleClient();
+  auth.setCredentials({ access_token: accessToken });
+  const drive = google.drive({ version: "v3", auth });
+  const response = await drive.files.create({
+    requestBody: { name, mimeType: "application/vnd.google-apps.folder", ...(parentId ? { parents: [parentId] } : {}) },
+    fields: "id,name,parents,webViewLink",
+  });
+  return response.data;
 }

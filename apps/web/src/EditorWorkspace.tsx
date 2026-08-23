@@ -5,6 +5,7 @@ import {
   useState,
   type CSSProperties,
   type DragEvent,
+  type PointerEvent,
 } from "react";
 
 type Asset = {
@@ -61,6 +62,15 @@ type Caption = {
   end_seconds: number;
   text_content: string;
   style: { fontSize?: number; color?: string };
+};
+type TimelineDrag = {
+  kind: "move" | "resize-start" | "resize-end";
+  clipId: string;
+  trackId: string;
+  originX: number;
+  start: number;
+  duration: number;
+  sourceStart: number;
 };
 
 const freshState = (): SequenceState => ({
@@ -148,16 +158,19 @@ export function EditorWorkspace({
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [studioStatus, setStudioStatus] = useState("");
+  const [studioAutoPublish, setStudioAutoPublish] = useState(false);
   const [sourceUrl, setSourceUrl] = useState("");
   const [programUrl, setProgramUrl] = useState("");
   const [message, setMessage] = useState("");
   const [exportStatus, setExportStatus] = useState("");
   const [aiStatus, setAiStatus] = useState("");
-  const [tool, setTool] = useState("V");
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [zoom, setZoom] = useState(60);
+  const [dialog, setDialog] = useState<{ title: string; value: string; placeholder: string; submit: (value: string) => void } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const root = useRef<HTMLDivElement>(null);
+  const timeline = useRef<HTMLElement>(null);
+  const timelineDrag = useRef<TimelineDrag | null>(null);
   const sourceVideo = useRef<HTMLVideoElement>(null);
   const programVideo = useRef<HTMLVideoElement>(null);
 
@@ -201,8 +214,6 @@ export function EditorWorkspace({
       else if (key === "i") commit({ ...state, inPoint: state.playhead });
       else if (key === "o") commit({ ...state, outPoint: state.playhead });
       else if (key === "c") splitSelected();
-      else if (key === "v") setTool("V");
-      else if (key === "a") setTool("A");
       else if (key === "b") rippleSelected();
       else if (key === "n") rollingSelected();
       else if (key === "t") addText();
@@ -285,12 +296,13 @@ export function EditorWorkspace({
   async function uploadFiles(files: FileList | File[]) {
     for (const file of Array.from(files)) {
       setMessage(`Enviando ${file.name}...`);
+      const formData = new FormData();
+      formData.append("file", file);
       const response = await authFetch(
-        `/v1/projects/${projectId}/assets?filename=${encodeURIComponent(file.name)}&mime_type=${encodeURIComponent(file.type)}`,
+        `/v1/projects/${projectId}/assets/upload`,
         {
           method: "POST",
-          headers: { "Content-Type": file.type || "application/octet-stream" },
-          body: file,
+          body: formData,
         },
       );
       if (!response.ok)
@@ -303,8 +315,10 @@ export function EditorWorkspace({
     }
   }
   async function importUrl() {
-    const url = window.prompt("URL HTTPS da mídia");
-    if (!url?.trim()) return;
+    setDialog({ title: "Importar mídia por URL", value: "", placeholder: "https://...", submit: (url) => void importUrlValue(url) });
+  }
+  async function importUrlValue(url: string) {
+    if (!url.trim()) return;
     setMessage("Baixando mídia por URL...");
     const response = await authFetch(
       `/v1/projects/${projectId}/assets/import-url`,
@@ -328,18 +342,21 @@ export function EditorWorkspace({
     }
   }
   async function createFolder() {
-    const name = window.prompt("Nome da pasta");
-    if (!name?.trim()) return;
+    setDialog({ title: "Criar pasta", value: "", placeholder: "Nome da pasta", submit: (name) => void createFolderValue(name) });
+  }
+  async function createFolderValue(name: string) {
+    if (!name.trim()) return;
     const response = await authFetch(`/v1/projects/${projectId}/folders`, {
       method: "POST",
       body: JSON.stringify({ name }),
     });
     if (response.ok) loadFolders();
   }
-  function addAsset(asset: Asset) {
+  function addAsset(asset: Asset, startOverride?: number, trackId?: string) {
     if (asset.status !== "ready") return;
     const track = state.tracks.find(
       (item) =>
+        (!trackId || item.id === trackId) &&
         item.type === (asset.kind === "audio" ? "audio" : "video") &&
         !item.locked,
     );
@@ -354,7 +371,7 @@ export function EditorWorkspace({
     const clip: Clip = {
       id: crypto.randomUUID(),
       assetId: asset.id,
-      start: end,
+      start: startOverride ?? end,
       sourceStart: 0,
       duration,
       speed: 1,
@@ -379,6 +396,77 @@ export function EditorWorkspace({
         ),
       })),
     });
+  }
+  function syncPreview(seconds: number) {
+    const selected = state.tracks
+      .flatMap((track) => track.clips)
+      .find((clip) => selectedIds.includes(clip.id));
+    const program = programVideo.current;
+    const source = sourceVideo.current;
+    if (program) program.currentTime = seconds;
+    if (source) {
+      const sourceTime = selected
+        ? selected.sourceStart + Math.max(0, seconds - selected.start) * selected.speed
+        : seconds;
+      source.currentTime = sourceTime;
+    }
+  }
+  function seekTimeline(event: PointerEvent<HTMLElement>) {
+    if (timelineDrag.current) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const seconds = Math.max(0, Math.round((((event.clientX - bounds.left) * 60) / zoom) * 10) / 10);
+    setState((current) => ({ ...current, playhead: seconds }));
+    syncPreview(seconds);
+  }
+  function startTimelineDrag(
+    event: PointerEvent<HTMLElement>,
+    trackId: string,
+    clip: Clip,
+    kind: TimelineDrag["kind"],
+  ) {
+    event.stopPropagation();
+    setSelectedIds([clip.id]);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    timelineDrag.current = {
+      kind,
+      clipId: clip.id,
+      trackId,
+      originX: event.clientX,
+      start: clip.start,
+      duration: clip.duration,
+      sourceStart: clip.sourceStart,
+    };
+  }
+  function updateTimelineDrag(event: PointerEvent<HTMLElement>) {
+    const drag = timelineDrag.current;
+    if (!drag) return;
+    const delta = Math.round((((event.clientX - drag.originX) * 60) / zoom) * 10) / 10;
+    let patch: Partial<Clip>;
+    if (drag.kind === "move") {
+      patch = { start: Math.max(0, drag.start + delta) };
+    } else if (drag.kind === "resize-start") {
+      const nextStart = Math.max(0, Math.min(drag.start + drag.duration - 0.1, drag.start + delta));
+      patch = {
+        start: nextStart,
+        sourceStart: Math.max(0, drag.sourceStart + nextStart - drag.start),
+        duration: drag.duration - (nextStart - drag.start),
+      };
+    } else {
+      patch = { duration: Math.max(0.1, drag.duration + delta) };
+    }
+    setState((current) => ({
+      ...current,
+      tracks: current.tracks.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => clip.id === drag.clipId ? { ...clip, ...patch } : clip),
+      })),
+    }));
+  }
+  function finishTimelineDrag() {
+    if (!timelineDrag.current) return;
+    timelineDrag.current = null;
+    setHistory((current) => [...current.slice(0, historyIndex + 1), state]);
+    setHistoryIndex((current) => current + 1);
   }
   function moveSelected(delta: number) {
     updateSelected({
@@ -433,8 +521,13 @@ export function EditorWorkspace({
     );
     const clip = track?.clips.find((item) => item.id === id);
     if (!track || !clip) return;
-    const amount = Number(window.prompt("Ajuste em segundos", "1"));
-    if (!Number.isFinite(amount)) return;
+    setDialog({ title: "Ajuste Ripple", value: "1", placeholder: "Segundos", submit: (value) => applyRipple(Number(value)) });
+  }
+  function applyRipple(amount: number) {
+    const id = selectedIds[0];
+    const track = state.tracks.find((item) => item.clips.some((clip) => clip.id === id));
+    const clip = track?.clips.find((item) => item.id === id);
+    if (!track || !clip || !Number.isFinite(amount)) return;
     commit({
       ...state,
       tracks: state.tracks.map((item) =>
@@ -465,8 +558,13 @@ export function EditorWorkspace({
     const index = track.clips.findIndex((clip) => clip.id === id);
     const nextClip = track.clips[index + 1];
     if (!nextClip) return;
-    const amount = Number(window.prompt("Mover o corte em segundos", "1"));
-    if (!Number.isFinite(amount)) return;
+    setDialog({ title: "Ajuste Rolling", value: "1", placeholder: "Segundos", submit: (value) => applyRolling(Number(value)) });
+  }
+  function applyRolling(amount: number) {
+    const id = selectedIds[0];
+    const track = state.tracks.find((item) => item.clips.some((clip) => clip.id === id));
+    const index = track?.clips.findIndex((clip) => clip.id === id) ?? -1;
+    if (!track || index < 0 || !track.clips[index + 1] || !Number.isFinite(amount)) return;
     commit({
       ...state,
       tracks: state.tracks.map((item) =>
@@ -491,8 +589,10 @@ export function EditorWorkspace({
     });
   }
   function addText() {
-    const text = window.prompt("Texto do overlay");
-    if (!text?.trim()) return;
+    setDialog({ title: "Adicionar texto", value: "", placeholder: "Texto do overlay", submit: (text) => void addTextValue(text) });
+  }
+  function addTextValue(text: string) {
+    if (!text.trim()) return;
     const track = state.tracks.find(
       (item) => item.type === "text" && !item.locked,
     );
@@ -604,6 +704,7 @@ export function EditorWorkspace({
         duration_preset: "45-90",
         format: "full_screen",
         style: "retention",
+        auto_publish: studioAutoPublish,
       }),
     });
     if (!response.ok) {
@@ -624,7 +725,13 @@ export function EditorWorkspace({
         ).runs ?? []
       ).find((item: { id: string }) => item.id === run.id);
       if (current?.status === "completed") {
-        setStudioStatus(`Clip Studio gerou ${current.clips_count} clips.`);
+        setStudioStatus(
+          `Clip Studio gerou ${current.clips_count} clips. ${
+            studioAutoPublish
+              ? "Publicação automática iniciada."
+              : "Aguardando aprovação (veja Revisão)."
+          }`,
+        );
         return;
       }
       if (current?.status === "error") {
@@ -651,7 +758,11 @@ export function EditorWorkspace({
     const clipId = event.dataTransfer.getData("clip-id");
     if (assetId) {
       const asset = assets.find((item) => item.id === assetId);
-      if (asset) addAsset(asset);
+      if (asset) {
+        const lane = event.currentTarget.getBoundingClientRect();
+        const start = Math.max(0, Math.round((((event.clientX - lane.left) * 60) / zoom) * 10) / 10);
+        addAsset(asset, start, trackId);
+      }
       return;
     }
     if (clipId && trackId) {
@@ -701,6 +812,17 @@ export function EditorWorkspace({
       ref={root}
       onDragOver={(event) => event.preventDefault()}
     >
+      <aside className="editor-rail">
+        <div className="capcut-logo">✣</div>
+        <div className="editor-rail-item active">♧<span>Mídia</span></div>
+        <div className="editor-rail-item">▣<span>Modelos</span></div>
+        <div className="editor-rail-item">✧<span>Elementos</span></div>
+        <div className="editor-rail-item">♫<span>Áudio</span></div>
+        <div className="editor-rail-item">T<span>Texto</span></div>
+        <div className="editor-rail-item">▤<span>Legendas</span></div>
+        <div className="editor-rail-item">⌁<span>Transcrição</span></div>
+        <div className="editor-rail-item">☆<span>Efeitos</span></div>
+      </aside>
       <header className="editor-header">
         <div className="editor-brand">
           <b>CLIP</b>CON <span>/ EDITOR</span>
@@ -716,6 +838,17 @@ export function EditorWorkspace({
           <span className="save-state">
             {sequence?.save_status === "saving" ? "Salvando..." : "Salvo"}
           </span>
+          <select
+            className="studio-mode"
+            value={studioAutoPublish ? "auto" : "approval"}
+            onChange={(event) =>
+              setStudioAutoPublish(event.target.value === "auto")
+            }
+            title="Modo de publicação dos clips gerados"
+          >
+            <option value="approval">Publicação: por aprovação</option>
+            <option value="auto">Publicação: automática</option>
+          </select>
           <button onClick={runClipStudio}>✦ Clip Studio</button>
           <button onClick={aiEdit}>✦ AI Edit</button>
           <button onClick={addText}>T Texto</button>
@@ -743,6 +876,12 @@ export function EditorWorkspace({
               }
             />
           </div>
+          <div className="capcut-create-card">
+            <strong>O que você deseja criar?</strong>
+            <p>Descreva o seu vídeo. Adicione um quadro inicial, um quadro final ou ambos.</p>
+            <div><span>＋</span><b>✧ Seedance 1.0 Fast</b><small>✦ 0.25</small></div>
+          </div>
+          <div className="capcut-tabs"><span className="active">Carregamentos</span><span>Gerados</span></div>
           <div className="media-toolbar">
             <button onClick={() => fileInput.current?.click()}>Importar</button>
             <button onClick={importUrl}>URL</button>
@@ -845,12 +984,10 @@ export function EditorWorkspace({
                   ref={sourceVideo}
                   controls
                   src={sourceUrl}
-                  onTimeUpdate={(event) =>
-                    setState((current) => ({
-                      ...current,
-                      playhead: event.currentTarget.currentTime,
-                    }))
-                  }
+                  onTimeUpdate={(event) => {
+                    const currentTime = event.currentTarget.currentTime;
+                    setState((current) => ({ ...current, playhead: currentTime }));
+                  }}
                 />
               ) : (
                 <div className="monitor-empty">
@@ -860,8 +997,8 @@ export function EditorWorkspace({
               <div className="monitor-controls">
                 <button
                   onClick={() =>
-                    sourceVideo.current &&
-                    (sourceVideo.current.currentTime -= 1 / 30)
+                     sourceVideo.current &&
+                     (sourceVideo.current.currentTime = Math.max(0, sourceVideo.current.currentTime - 1 / 30))
                   }
                 >
                   ‹
@@ -871,8 +1008,8 @@ export function EditorWorkspace({
                 </button>
                 <button
                   onClick={() =>
-                    sourceVideo.current &&
-                    (sourceVideo.current.currentTime += 1 / 30)
+                     sourceVideo.current &&
+                     (sourceVideo.current.currentTime = sourceVideo.current.currentTime + 1 / 30)
                   }
                 >
                   ›
@@ -895,7 +1032,15 @@ export function EditorWorkspace({
                 </small>
               </div>
               {programUrl ? (
-                <video ref={programVideo} controls src={programUrl} />
+                <video
+                  ref={programVideo}
+                  controls
+                  src={programUrl}
+                  onTimeUpdate={(event) => {
+                    const currentTime = event.currentTarget.currentTime;
+                    setState((current) => ({ ...current, playhead: currentTime }));
+                  }}
+                />
               ) : (
                 <div className="monitor-empty">
                   Arraste um clip para a timeline.
@@ -916,24 +1061,7 @@ export function EditorWorkspace({
             </div>
           </section>
           <div className="editor-toolbar">
-            <button
-              className={tool === "V" ? "active" : ""}
-              onClick={() => setTool("V")}
-            >
-              V Seleção
-            </button>
-            <button
-              className={tool === "C" ? "active" : ""}
-              onClick={() => setTool("C")}
-            >
-              C Razor
-            </button>
-            <button
-              className={tool === "A" ? "active" : ""}
-              onClick={() => setTool("A")}
-            >
-              A Track
-            </button>
+             <button onClick={splitSelected}>✂ Cortar no playhead</button>
             <button onClick={rippleSelected}>B Ripple</button>
             <button onClick={rollingSelected}>N Rolling</button>
             <button onClick={undo}>Undo</button>
@@ -949,8 +1077,14 @@ export function EditorWorkspace({
               />
             </label>
           </div>
-          <section className="sequence-panel">
-            <div className="ruler">
+           <section
+             className="sequence-panel"
+             ref={timeline}
+             onPointerMove={updateTimelineDrag}
+             onPointerUp={finishTimelineDrag}
+             onPointerCancel={finishTimelineDrag}
+           >
+            <div className="ruler" onPointerDown={seekTimeline}>
               <span>0:00</span>
               {Array.from(
                 { length: Math.ceil(duration / 10) + 1 },
@@ -993,10 +1127,11 @@ export function EditorWorkspace({
                       {track.locked ? "🔒" : "◇"}
                     </button>
                   </div>
-                  <div
-                    className="track-lane"
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={(event) => dropAsset(event, track.id)}
+                   <div
+                     className="track-lane"
+                     onDragOver={(event) => event.preventDefault()}
+                     onDrop={(event) => dropAsset(event, track.id)}
+                     onPointerDown={seekTimeline}
                     style={
                       { "--timeline-scale": `${zoom / 60}` } as CSSProperties
                     }
@@ -1008,10 +1143,6 @@ export function EditorWorkspace({
                       return (
                         <button
                           className={`timeline-clip ${asset?.kind ?? (clip.text ? "text" : "video")} ${selectedIds.includes(clip.id) ? "selected" : ""}`}
-                          draggable
-                          onDragStart={(event) =>
-                            event.dataTransfer.setData("clip-id", clip.id)
-                          }
                           key={clip.id}
                           style={{
                             left: `${(clip.start * zoom) / 60}px`,
@@ -1021,12 +1152,15 @@ export function EditorWorkspace({
                             setSelectedIds(
                               event.ctrlKey || event.metaKey
                                 ? [...selectedIds, clip.id]
-                                : [clip.id],
+                              : [clip.id],
                             )
                           }
+                          onPointerDown={(event) => startTimelineDrag(event, track.id, clip, "move")}
                         >
+                          <span className="timeline-handle start" onPointerDown={(event) => startTimelineDrag(event, track.id, clip, "resize-start")} />
                           <strong>{clip.text ?? asset?.name ?? "Mídia"}</strong>
                           <small>{formatTime(clip.duration)}</small>
+                          <span className="timeline-handle end" onPointerDown={(event) => startTimelineDrag(event, track.id, clip, "resize-end")} />
                         </button>
                       );
                     })}
@@ -1109,6 +1243,15 @@ export function EditorWorkspace({
           {exportStatus && <div className="export-status">{exportStatus}</div>}
         </aside>
       </div>
+      {dialog && (
+        <div className="modal-backdrop">
+          <form className="modal card site-dialog" onSubmit={(event) => { event.preventDefault(); const submit = dialog.submit; const value = (event.currentTarget.elements.namedItem("dialog-value") as HTMLInputElement).value; setDialog(null); submit(value); }}>
+            <div className="modal-head"><h2>{dialog.title}</h2><button type="button" className="icon-button" onClick={() => setDialog(null)}>×</button></div>
+            <input autoFocus name="dialog-value" defaultValue={dialog.value} placeholder={dialog.placeholder} />
+            <div className="dialog-actions"><button type="button" onClick={() => setDialog(null)}>Cancelar</button><button className="primary" type="submit">Continuar</button></div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

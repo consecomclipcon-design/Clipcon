@@ -1,6 +1,6 @@
 import { readFile, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { config } from "./config.js";
 import { probeMediaDuration, splitAudio } from "./media.js";
 
@@ -45,7 +45,7 @@ async function transcribeOne(
   const file = await readFile(filePath);
   for (let attempt = 0; attempt < 12; attempt++) {
     const form = new FormData();
-    form.append("file", new Blob([file]), "audio.mp3");
+    form.append("file", new Blob([file]), basename(filePath));
     form.append("model", model);
     form.append("response_format", "verbose_json");
     form.append("timestamp_granularities[]", "segment");

@@ -21,6 +21,7 @@ import {
   ingestMedia,
 } from "./media.js";
 import { transcribeAudio, analyzeTranscript } from "./groq.js";
+import { selectDiverse } from "./dedup.js";
 import {
   fetchYoutubeVideoMetrics,
   uploadFileToDrive,
@@ -1460,20 +1461,54 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
           candidate.end - candidate.start <= 120,
       )
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-    const selected: typeof usable = [];
-    for (const candidate of usable) {
-      if (
-        selected.some(
-          (other) =>
-            Math.min(candidate.end, other.end) -
-              Math.max(candidate.start, other.start) >
-            8,
-        )
-      )
-        continue;
-      selected.push(candidate);
-      if (selected.length >= 5) break;
-    }
+
+    // Anti-duplicação: overlap temporal + similaridade semântica + diversidade.
+    // Guard extra: descarta momentos já usados em runs anteriores do mesmo vídeo.
+    const priorCandidates = sourceVideoId
+      ? (
+          await supabase
+            .from("clip_candidates")
+            .select("start_seconds, end_seconds")
+            .eq("project_id", run.project_id)
+            .neq("status", "discarded")
+            .limit(500)
+        ).data ?? []
+      : [];
+    const priorAsDedup = priorCandidates.map((row) => ({
+      start: Number(row.start_seconds),
+      end: Number(row.end_seconds),
+    }));
+    const dedupInput = usable.map((candidate) => {
+      const overlappingPrior = priorAsDedup.find(
+        (p) =>
+          Math.min(candidate.end, p.end) - Math.max(candidate.start, p.start) >
+          0.5 * (p.end - p.start),
+      );
+      return {
+        start: Number(candidate.start),
+        end: Number(candidate.end),
+        score: overlappingPrior ? -1 : (candidate.score ?? 50),
+        text: transcript.segments
+          .filter(
+            (segment) =>
+              segment.end > candidate.start && segment.start < candidate.end,
+          )
+          .map((segment) => segment.text)
+          .join(" "),
+      };
+    });
+    const diversified = selectDiverse(dedupInput);
+    const selectedScores = new Map(
+      diversified.map((d) => [d.start, d.score]),
+    );
+    const selected = usable.filter((candidate) => {
+      const key = Number(candidate.start);
+      return selectedScores.has(key) && (selectedScores.get(key) ?? 0) >= 0;
+    });
+    if (diversified.length < selected.length)
+      console.log(
+        `[ClipStudio:${run.id}] ${selected.length} candidatos após dedup (${usable.length} brutos, ${priorAsDedup.length} prévios do projeto)`,
+      );
     if (
       !selected.length &&
       Number.isFinite(asset?.duration_seconds) &&
