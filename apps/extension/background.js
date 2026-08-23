@@ -436,9 +436,16 @@ async function startTransfer(params) {
     if (!auth)
       return { ok: false, error: "Sessão expirada — clique em 🔗 Conectar extensão no ClipCon novamente." };
 
-    fmt = state.formats.find((f) => f.itag === itag);
-    if (!fmt || !fmt.url)
-      return { ok: false, error: "Formato não encontrado — escolha a qualidade novamente." };
+    fmt = Array.isArray(state.formats)
+      ? state.formats.find((f) => f.itag === itag)
+      : undefined;
+    if (!fmt || !fmt.url) {
+      const diag = `phase=${state.phase} keys=[${Object.keys(state).join(",")}] formats=${JSON.stringify(state.formats ?? null).slice(0, 120)}`;
+      return {
+        ok: false,
+        error: `Estado sem formatos válidos (${diag}). Clique em “Começar de novo” e selecione a qualidade outra vez.`,
+      };
+    }
 
     clen = parseInt(fmt.contentLength || 0, 10);
     if (clen > SAFE_MAX_BYTES)
@@ -515,8 +522,8 @@ async function retryFromError() {
   const state = await getState();
   if (!state || !state.error) return;
   const stage = state.error.stage;
-  if (stage === "capture" || stage === "preflight") {
-    await setState({ phase: "READY", error: null });
+  if (stage === "capture" || stage === "preflight" || stage === "start") {
+    await setState({ phase: "READY", error: null, notice: null });
     return;
   }
   if (stage === "upload" || stage === "download") {
