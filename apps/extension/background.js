@@ -425,6 +425,8 @@ async function beginTransfer(itag, workspaceId, projectId) {
     projectId,
     filename,
     error: null,
+    notice: null,
+    startedAt: Date.now(),
     progress: { phase: "download", received: 0, total: clen },
   });
   badge("%", "#2563eb");

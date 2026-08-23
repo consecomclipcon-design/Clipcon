@@ -277,8 +277,9 @@ function App() {
       const { code } = (await res.json()) as { code: string };
       await navigator.clipboard.writeText(code);
       setToast({
-        title: "Código copiado!",
-        message: `Abra um vídeo no YouTube — a extensão conecta sozinha (${code}). Válido por 5 min.`,
+        title: "Extensão conectada! 🎉",
+        message:
+          "A conexão é permanente — não vai pedir login nunca mais. Abra um vídeo no YouTube e clique em \"Adicionar ao ClipCon\".",
       } as Notification);
       window.setTimeout(() => setToast(null), 7000);
     } catch (e) {

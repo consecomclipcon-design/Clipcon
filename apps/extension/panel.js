@@ -61,7 +61,7 @@
   }
 
   const CSS =
-    ":host{all:initial}" +
+    ":host{all:initial;color-scheme:dark}" +
     "*{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}" +
     ".panel{width:320px;background:#14161d;color:#e8eaf0;border:1px solid #2a2f3c;border-radius:14px;box-shadow:0 18px 50px rgba(0,0,0,.55);overflow:hidden;font-size:13px}" +
     ".hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #232834}" +
@@ -87,7 +87,18 @@
     ".step.on{color:#16a34a;border-style:solid;border-color:rgba(22,163,74,.4)}" +
     ".step.act{color:#e8eaf0;border-style:solid;border-color:#2563eb}" +
     ".done-msg{text-align:center;color:#16a34a;font-size:13px;line-height:1.5;padding:4px 0 2px;white-space:pre-line}" +
-    ".foot{display:flex;justify-content:space-between;padding:8px 14px;border-top:1px solid #232834;color:#5b6272;font-size:10px;letter-spacing:.08em}";
+    ".foot{display:flex;justify-content:space-between;padding:8px 14px;border-top:1px solid #232834;color:#5b6272;font-size:10px;letter-spacing:.08em}" +
+    "option{background:#1b1f29;color:#e8eaf0}" +
+    "select:disabled{opacity:.6}" +
+    ".indet{height:7px;border-radius:99px;background:linear-gradient(90deg,#232834 25%,#2563eb 50%,#232834 75%);background-size:200% 100%;animation:ccindet 1.1s linear infinite}" +
+    "@keyframes ccindet{from{background-position:200% 0}to{background-position:-200% 0}}" +
+    ".phase-tag{display:flex;align-items:center;gap:7px;font-size:12px;color:#9cc8a5;font-weight:600}" +
+    ".elapsed{font-size:10px;color:#5b6272;text-align:right;margin-top:-4px}" +
+    ".track{display:flex;gap:5px}" +
+    ".track i{flex:1;height:4px;border-radius:99px;background:#232834}" +
+    ".track i.on{background:#16a34a}" +
+    ".track i.act{background:#2563eb;animation:ccpulse 1.2s ease-in-out infinite alternate}" +
+    "@keyframes ccpulse{from{opacity:.55}to{opacity:1}}";
 
   function ensure() {
     if (host) return;
@@ -265,7 +276,7 @@
         el("strong", { text: "Conectar ao ClipCon" }),
         el("span", {
           text:
-            'No ClipCon, clique em "🔗 Conectar extensão" e abra um vídeo aqui — conecta sozinho. Ou entre abaixo (uma única vez).',
+            'Clique em "🔗 Conectar extensão" no ClipCon — este painel detecta sozinho em segundos. A conexão é permanente. Ou entre abaixo apenas se preferir.',
         }),
       ]),
       email,
@@ -338,6 +349,19 @@
       loadProjects(wsSel.value);
     });
     out.push(wsSel);
+    if (!meta.wsLoading && !meta.workspaces.length) {
+      out.push(
+        el("button", {
+          class: "g",
+          type: "button",
+          text: "↻ Tentar carregar workspaces novamente",
+          onclick: () => {
+            meta.authError = null;
+            loadWorkspaces();
+          },
+        })
+      );
+    }
 
     out.push(el("label", { text: "Projeto" }));
     const prSel = el("select");
@@ -402,14 +426,26 @@
     pr.value = pct;
     return pr;
   }
-  function phaseRow(name, pct, active) {
+  function phaseRow(name, pct, active, totalKnown) {
+    const barEl = active && !totalKnown ? el("div", { class: "indet" }) : bar(active ? pct : name === "Download" ? 100 : 0);
     return [
       el("div", { class: "row" + (active ? "" : " dim") }, [
         el("span", { text: name }),
-        el("b", { text: pct + "%" }),
+        el("b", { text: totalKnown ? pct + "%" : "…" }),
       ]),
-      bar(active ? pct : name === "Download" ? 100 : 0),
+      barEl,
     ];
+  }
+  function track(idx) {
+    const names = ["Baixar", "Enviar", "Processar", "Clip Studio"];
+    const t = el("div", { class: "track" });
+    for (let i = 0; i < 4; i++) t.append(el("i", { class: i < idx ? "on" : i === idx ? "act" : "", title: names[i] }));
+    return t;
+  }
+  function elapsed(st) {
+    if (!st || !st.startedAt) return "";
+    const s = Math.max(0, Math.round((Date.now() - st.startedAt) / 1000));
+    return "⏱ " + (s >= 60 ? Math.floor(s / 60) + "m" + String(s % 60).padStart(2, "0") : s + "s");
   }
 
   function transferView(st) {
@@ -417,14 +453,21 @@
     const isDl = st.phase === "DOWNLOADING";
     const dlPct = p.total ? Math.round(((isDl ? p.received : p.total) / p.total) * 100) : 0;
     const upPct = !isDl && p.total ? Math.round((p.received / p.total) * 100) : 0;
+    const stageIdx = isDl ? 0 : 1;
 
-    const out = [...videoBlock(st.video)];
-    out.push(...phaseRow("Download", dlPct, isDl));
-    out.push(...phaseRow("Upload", upPct, !isDl));
-    out.push(el("div", { class: "note", text: p.total ? fmtBytes(p.received) + " de " + fmtBytes(p.total) : "preparando…" }));
+    const out = [];
+    out.push(el("div", { class: "phase-tag", text: isDl ? "⟳ Baixando vídeo do YouTube…" : "⟳ Enviando para o ClipCon…" }));
+    out.push(track(stageIdx));
+    out.push(...videoBlock(st.video));
+    out.push(...phaseRow("Download", dlPct, isDl, !!p.total));
+    out.push(...phaseRow("Upload", upPct, !isDl, !!p.total));
+    out.push(
+      el("div", { class: "note", text: p.total ? fmtBytes(p.received) + " de " + fmtBytes(p.total) : "tamanho total desconhecido — baixando…" })
+    );
     if (st.notice) out.push(el("div", { class: "note warn", text: st.notice }));
     out.push(el("button", { class: "g", type: "button", text: "Cancelar", onclick: () => send({ type: "UI_CANCEL" }) }));
     out.push(el("div", { class: "note", text: "Pode fechar este painel — a transferência continua." }));
+    out.push(el("div", { class: "elapsed", text: elapsed(st) }));
     return out;
   }
 
@@ -433,28 +476,40 @@
   }
 
   function stepsView(st, activeIdx) {
-    const out = [...videoBlock(st.video)];
+    const out = [];
+    out.push(
+      el("div", {
+        class: "phase-tag",
+        text: activeIdx >= 2 ? "⟳ Iniciando Clip Studio…" : "⟳ Verificando processamento no ClipCon…",
+      })
+    );
+    out.push(track(activeIdx + 1));
+    out.push(...videoBlock(st.video));
     out.push(
       el("div", { class: "steps" }, [
-        stepEl("✓ Vídeo enviado", "on"),
-        stepEl(activeIdx >= 1 ? "⟳ Processamento iniciado" : "· Processamento", activeIdx >= 1 ? "act" : ""),
-        stepEl(activeIdx >= 2 ? "⟳ Iniciando Clip Studio…" : "· Clip Studio", activeIdx >= 2 ? "act" : ""),
+        stepEl("✓ Download concluído", "on"),
+        stepEl("✓ Enviado ao ClipCon", "on"),
+        stepEl(activeIdx >= 1 ? "⟳ Processando asset…" : "· Processamento", activeIdx >= 1 ? "act" : ""),
+        stepEl(activeIdx >= 2 ? "⟳ Disparando Clip Studio…" : "· Clip Studio", activeIdx >= 2 ? "act" : ""),
       ])
     );
     if (st.notice) out.push(el("div", { class: "note warn", text: st.notice }));
     out.push(el("div", { class: "note", text: "Você pode fechar esta janela. O processamento continuará no ClipCon." }));
     out.push(el("button", { class: "g", type: "button", text: "Parar de acompanhar", onclick: () => send({ type: "UI_CANCEL" }) }));
+    out.push(el("div", { class: "elapsed", text: elapsed(st) }));
     return out;
   }
 
   function doneView() {
     return [
       el("div", { class: "steps" }, [
-        stepEl("✓ Vídeo enviado", "on"),
-        stepEl("✓ Processamento iniciado", "on"),
+        stepEl("✓ Download do vídeo", "on"),
+        stepEl("✓ Envio ao ClipCon", "on"),
+        stepEl("✓ Asset processado", "on"),
         stepEl("✓ Clip Studio iniciado", "on"),
       ]),
-      el("div", { class: "done-msg", text: "Você pode fechar esta janela.\nO processamento continuará no ClipCon." }),
+      el("div", { class: "done-msg", text: "Tudo pronto!\nO processamento continua no ClipCon — pode fechar esta janela." }),
+      el("div", { class: "elapsed", text: elapsed(jobState) }),
       el("button", { class: "g", type: "button", text: "Enviar outro vídeo", onclick: () => send({ type: "UI_RESET" }) }),
     ];
   }
