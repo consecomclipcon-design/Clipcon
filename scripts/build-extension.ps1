@@ -1,4 +1,5 @@
-# Gera o ZIP distribuível da extensão + metadados de versão para o web app.
+# Gera o ZIP distribuivel da extensao + metadados de versao para o web app.
+# preauth.js (credenciais locais) NUNCA entra no pacote.
 # Uso: powershell -File scripts\build-extension.ps1
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -10,12 +11,18 @@ $version = $manifest.version
 
 New-Item -ItemType Directory -Force $out | Out-Null
 
+# staging sem arquivos sensíveis
+$staging = Join-Path $env:TEMP ("clipcon-ext-" + [guid]::NewGuid().ToString("N").Substring(0,8))
+New-Item -ItemType Directory -Force $staging | Out-Null
+Get-ChildItem -Path $ext -Exclude "preauth.js" | Copy-Item -Destination $staging -Recurse -Force
+
 $zip = Join-Path $out "clipcon-extension-v$version.zip"
 if (Test-Path $zip) { Remove-Item $zip }
-Compress-Archive -Path (Join-Path $ext "*") -DestinationPath $zip
+Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $zip
+Remove-Item $staging -Recurse -Force
 
 @{ version = $version; builtAt = (Get-Date).ToUniversalTime().ToString("o"); file = "clipcon-extension-v$version.zip" } |
   ConvertTo-Json | Set-Content (Join-Path $out "extension-meta.json") -Encoding utf8
 
-Write-Output "Extensão v$version empacotada:"
+Write-Output "Extensao v$version empacotada (preauth excluido):"
 Get-ChildItem $out | Select-Object Name, Length

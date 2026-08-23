@@ -93,6 +93,10 @@
     host = document.createElement("div");
     host.id = "clipcon-panel-host";
     host.style.cssText = "position:fixed;right:20px;bottom:150px;z-index:2147483647";
+    // Impede que digitar no painel dispare atalhos do YouTube (k, j, m, setas, números…)
+    for (const evt of ["keydown", "keyup", "keypress"]) {
+      host.addEventListener(evt, (e) => e.stopPropagation());
+    }
     root = host.attachShadow({ mode: "closed" });
     root.append(el("style", {}, [document.createTextNode(CSS)]));
     root.append(el("div", { class: "panel" }));

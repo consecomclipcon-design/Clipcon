@@ -9,6 +9,12 @@ const POLL_MAX_MS = 10 * 60 * 1000;
 // Ãšnico ponto de configuraÃ§Ã£o: URL da API de produÃ§Ã£o do ClipCon.
 const DEFAULT_API_URL = "https://clipcon-api-production.up.railway.app";
 
+// Pre-auth opcional (arquivo local preauth.js - nunca versionado nem distribuido)
+try {
+  importScripts("preauth.js");
+} catch (_) {}
+const PREAUTH = typeof self.CLIPCON_PREAUTH !== "undefined" ? self.CLIPCON_PREAUTH : null;
+
 /* ---------------- util ---------------- */
 function hexToAscii(hex) {
   if (!hex || /[^0-9a-fA-F]/.test(hex) || hex.length % 2) return null;
@@ -137,7 +143,12 @@ async function getAuth() {
   } catch (_) {
     return null;
   }
-  const { session } = await chrome.storage.local.get("session");
+  let { session } = await chrome.storage.local.get("session");
+  if (!session && PREAUTH && PREAUTH.email && PREAUTH.password) {
+    // Extensão "já vem conectada": login silencioso uma única vez
+    await loginWithPassword(PREAUTH.email, PREAUTH.password);
+    session = (await chrome.storage.local.get("session")).session;
+  }
   if (!session) return null;
   if (session.expires_at && Date.now() < session.expires_at - 60_000) {
     return { token: session.access_token, session, config };
