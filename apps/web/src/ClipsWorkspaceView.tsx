@@ -285,69 +285,55 @@ export function ClipsWorkspaceView({
         </div>
         <button type="button" onClick={() => setShowWorkspaceForm((value) => !value)}>＋ Criar workspace</button>
       </div>
+      {!workspaceId && (
       <div className="card workspace-browser">
         <div className="section-heading"><div><span className="eyebrow">SUAS PASTAS</span><h2>Workspaces</h2></div><span className="muted">Escolha onde seus clips vão ficar</span></div>
         <div className="workspace-folder-grid">
-          {workspaces.map((workspace) => <button type="button" className={workspace.id === workspaceId ? "workspace-folder active" : "workspace-folder"} key={workspace.id} onClick={() => selectWorkspace(workspace.id)}><span className="folder-glyph">📁</span><strong>{workspace.name}</strong><small>{projects.filter((project) => project.workspace_id === workspace.id).length} pastas de vídeo</small></button>)}
+          {workspaces.map((workspace) => <button type="button" className="workspace-folder" key={workspace.id} onClick={() => selectWorkspace(workspace.id)}><span className="folder-glyph">📁</span><strong>{workspace.name}</strong><small>{projects.filter((project) => project.workspace_id === workspace.id).length} pastas de vídeo</small></button>)}
           <button type="button" className="workspace-folder create" onClick={() => setShowWorkspaceForm(true)}><span className="folder-glyph">＋</span><strong>Criar workspace</strong><small>Começar um novo fluxo</small></button>
         </div>
       </div>
-      <div className="workspace-context-bar card">
-        <div><span className="eyebrow">WORKSPACE ATIVA</span><strong>{workspaces.find((item) => item.id === workspaceId)?.name ?? "Selecione uma workspace"}</strong></div>
-        <div className="workspace-context-actions">
-          <button type="button" onClick={() => setSettingsPanel("brand")}>🎨 Brand Kit</button>
-          <button type="button" onClick={() => setSettingsPanel("drive")}>📁 Google Drive <span className={googleStatus?.drive.connected ? "connected-dot" : ""}>{googleStatus?.drive.connected ? "Conectado" : "Configurar"}</span></button>
-          <button type="button" onClick={() => setSettingsPanel("youtube")}>▶ YouTube <span className={googleStatus?.youtube.connected ? "connected-dot" : ""}>{googleStatus?.youtube.connected ? "Conectado" : "Configurar"}</span></button>
-          <button type="button" onClick={() => setSettingsPanel("publish")}>⚙ Postagem <span>{publishMode === "automatic" ? "Automática" : "Manual"}</span></button>
-        </div>
-      </div>
-      {settingsPanel && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSettingsPanel(null)}><div className="modal card workspace-settings-modal">
-        <div className="modal-head"><div><span className="eyebrow">WORKSPACE / CONFIGURAÇÃO</span><h2>{settingsPanel === "brand" ? "Brand Kit" : settingsPanel === "drive" ? "Google Drive" : settingsPanel === "youtube" ? "YouTube" : "Postagem"}</h2></div><button type="button" className="icon-button" onClick={() => setSettingsPanel(null)}>×</button></div>
-        {settingsPanel === "brand" && <BrandKitView authFetch={authFetch} selectedWorkspaceId={workspaceId} />}
-        {settingsPanel === "youtube" && <IntegrationPanel provider="youtube" status={googleStatus?.youtube} onConnect={onConnect} onDisconnect={onDisconnect} />}
-        {settingsPanel === "drive" && <DriveFolderPanel authFetch={authFetch} workspaceId={workspaceId} workspace={workspaces.find((item) => item.id === workspaceId)} status={googleStatus?.drive} onConnect={onConnect} onWorkspaceUpdated={loadWorkspaces} />}
-        {settingsPanel === "publish" && <div className="settings-panel-content"><p className="muted">Esta preferência pertence somente à workspace atual.</p><label>Modo de publicação<select value={publishMode} onChange={(event) => savePublishMode(event.target.value as "manual" | "automatic")}><option value="manual">Manual / aprovação</option><option value="automatic">Automática</option></select></label></div>}
-      </div></div>}
-      {showWorkspaceForm && (
-        <form className="card inline-workspace-form" onSubmit={createWorkspace}>
-          <label>Nome do workspace<input required value={newWorkspaceName} onChange={(event) => setNewWorkspaceName(event.target.value)} placeholder="Flow Podcast" /></label>
-          <label>Slug<input required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" value={newWorkspaceSlug} onChange={(event) => setNewWorkspaceSlug(event.target.value)} placeholder="flow-podcast" /></label>
-          <button type="submit">Criar workspace</button>
-        </form>
       )}
-      <div className="clips-workspace-layout">
-        <div>
-          <div className="card clips-control-card">
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">CONFIGURAÇÃO ATIVA</span>
-                <h2>Workspace de clips</h2>
-              </div>
+      {workspaceId && (
+        <>
+          <div className="ws-topbar">
+            <button type="button" className="ws-back" onClick={() => setWorkspaceId("")}>← Trocar workspace</button>
+            <div className="ws-actions">
+              <button type="button" className="settings-launch-button" onClick={() => setSettingsPanel("publish")}>⚙ Postagem <span>{publishMode === "automatic" ? "Automática" : "Manual"}</span></button>
+              <button type="button" className="settings-launch-button brand" onClick={() => setSettingsPanel("brand")}>🎨 Configurar Brand Kit</button>
             </div>
-            <label>
-              Workspace
-              <select value={workspaceId} onChange={(event) => selectWorkspace(event.target.value)}>
-                {workspaces.map((workspace) => (
-                  <option value={workspace.id} key={workspace.id}>{workspace.name}</option>
-                ))}
-              </select>
-            </label>
-            <button type="button" className="settings-launch-button" onClick={() => setSettingsPanel("publish")}>⚙ Postagem <span>{publishMode === "automatic" ? "Automática" : "Manual"}</span></button>
-            <form className="clip-create-form" onSubmit={createClipProject}>
-              <span className="eyebrow">CRIAR DENTRO DA WORKSPACE</span>
-              <div className="composition-picker">
-                <span className="field-caption">Como você quer compor o vídeo?</span>
-                <div className="composition-options">
-                  <button type="button" className={compositionMode === "primary_only" ? "composition-option active" : "composition-option"} onClick={() => { setCompositionMode("primary_only"); setSecondarySourceUrl(""); }}>
-                    <span className="composition-preview primary-only"><i>PRIMÁRIO</i></span>
-                    <strong>Somente vídeo primário</strong><small>Tela inteira</small>
-                  </button>
-                  <button type="button" className={compositionMode === "split_screen" ? "composition-option active" : "composition-option"} onClick={() => setCompositionMode("split_screen")}>
-                    <span className="composition-preview split-screen"><i>SECUNDÁRIO</i><i>PRIMÁRIO</i></span>
-                    <strong>Primário + secundário</strong><small>Secundário em cima</small>
-                  </button>
+          </div>
+          {settingsPanel && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSettingsPanel(null)}><div className="modal card workspace-settings-modal">
+            <div className="modal-head"><div><span className="eyebrow">WORKSPACE / CONFIGURAÇÃO</span><h2>{settingsPanel === "brand" ? "Brand Kit" : settingsPanel === "drive" ? "Google Drive" : settingsPanel === "youtube" ? "YouTube" : "Postagem"}</h2></div><button type="button" className="icon-button" onClick={() => setSettingsPanel(null)}>×</button></div>
+            {settingsPanel === "brand" && <BrandKitView authFetch={authFetch} selectedWorkspaceId={workspaceId} />}
+            {settingsPanel === "youtube" && <IntegrationPanel provider="youtube" status={googleStatus?.youtube} onConnect={onConnect} onDisconnect={onDisconnect} />}
+            {settingsPanel === "drive" && <DriveFolderPanel authFetch={authFetch} workspaceId={workspaceId} workspace={workspaces.find((item) => item.id === workspaceId)} status={googleStatus?.drive} onConnect={onConnect} onWorkspaceUpdated={loadWorkspaces} />}
+            {settingsPanel === "publish" && <div className="settings-panel-content"><p className="muted">Esta preferência pertence somente à workspace atual.</p><label>Modo de publicação<select value={publishMode} onChange={(event) => savePublishMode(event.target.value as "manual" | "automatic")}><option value="manual">Manual / aprovação</option><option value="automatic">Automática</option></select></label><div className="publish-links"><button type="button" onClick={() => setSettingsPanel("drive")}>📁 Google Drive {googleStatus?.drive.connected ? "· Conectado" : "· Configurar"}</button><button type="button" onClick={() => setSettingsPanel("youtube")}>▶ YouTube {googleStatus?.youtube.connected ? "· Conectado" : "· Configurar"}</button></div></div>}
+          </div></div>}
+          <div className="clips-workspace-layout">
+            <div>
+              <div className="card clips-control-card">
+                <div className="section-heading">
+                  <div>
+                    <span className="eyebrow">CONFIGURAÇÃO ATIVA</span>
+                    <h2>{workspaces.find((item) => item.id === workspaceId)?.name ?? "Workspace de clips"}</h2>
+                  </div>
                 </div>
-              </div>
+                <form className="clip-create-form" onSubmit={createClipProject}>
+                  <span className="eyebrow">CRIAR DENTRO DA WORKSPACE</span>
+                  <div className="composition-picker">
+                    <span className="field-caption">Como você quer compor o vídeo?</span>
+                    <div className="composition-options">
+                      <button type="button" className={compositionMode === "primary_only" ? "composition-option active" : "composition-option"} onClick={() => { setCompositionMode("primary_only"); setSecondarySourceUrl(""); }}>
+                        <span className="composition-preview primary-only"><i>PRIMÁRIO</i></span>
+                        <strong>Somente vídeo primário</strong><small>Tela inteira</small>
+                      </button>
+                      <button type="button" className={compositionMode === "split_screen" ? "composition-option active" : "composition-option"} onClick={() => setCompositionMode("split_screen")}>
+                        <span className="composition-preview split-screen"><i>SECUNDÁRIO</i><i>PRIMÁRIO</i></span>
+                        <strong>Primário + secundário</strong><small>Secundário em cima</small>
+                      </button>
+                    </div>
+                  </div>
               <div className="media-source-picker">
                 <span className="field-caption">Fonte de mídia</span>
                 <div className="media-source-options">
@@ -389,46 +375,23 @@ export function ClipsWorkspaceView({
                   </button>
                 </div>
               )}
-              <button disabled={busy || !workspaceId} type="submit" className="primary">
+              <button disabled={busy || !workspaceId} type="submit" className="btn-shine">
                 {busy ? "Processando..." : "Criar clips"} <span>↗</span>
               </button>
               {status && <p className="form-note">{status}</p>}
             </form>
           </div>
         </div>
-        <div className="card clips-projects-card">
-          <span className="eyebrow">CONTEÚDOS DA WORKSPACE</span>
-          <h2>Pastas e resultados</h2>
-          <p className="muted">Cada geração cria uma pasta com o nome do vídeo e o horário da execução.</p>
-          {workspaceProjects.length ? workspaceProjects.map((project) => (
-              <button className="clips-project-row" key={project.id} onClick={() => openFolder(project.id)}>
-              <div>
-                <strong>{project.name}</strong>
-                <small>{new Date(project.created_at).toLocaleString("pt-BR")}</small>
-              </div>
-              <span className={`status-chip ${chipVariant(clipJobs.find((job) => job.project_id === project.id)?.status ?? project.status)}`}>{jobLabel(clipJobs.find((job) => job.project_id === project.id)?.status ?? project.status)}</span>
-              </button>
-            )) : <p className="muted">Nenhum vídeo criado nesta workspace.</p>}
-          {openProjectId && (
-            <div className="clip-folder-panel">
-              <div className="section-heading">
-                <div><span className="eyebrow">PASTA DE RESULTADOS</span><h3>{workspaceProjects.find((project) => project.id === openProjectId)?.name}</h3></div>
-                <button type="button" onClick={() => setOpenProjectId(null)}>Fechar</button>
-              </div>
-              <div className="clip-output-grid">
-                {outputAssets.map((asset) => {
-                  const publication = publications.find((item) => item.clip?.output_asset_id === asset.id);
-                  return <article className="clip-output-card" key={asset.id}>
-                    {assetUrls[asset.id] ? <video controls preload="metadata" src={assetUrls[asset.id]} /> : <div className="video-placeholder">Processando vídeo...</div>}
-                    <strong>{publication?.clip?.title ?? asset.name}</strong>
-                    {publication?.status === "scheduled" && <div className="review-actions"><button className="primary" onClick={() => review(asset.id, "approve")}>Aprovar</button><button className="danger" onClick={() => review(asset.id, "reject")}>Rejeitar</button></div>}
-                  </article>;
-                })}
-              </div>
-            </div>
-          )}
-        </div>
       </div>
+      </>
+      )}
+      {showWorkspaceForm && (
+        <form className="card inline-workspace-form" onSubmit={createWorkspace}>
+          <label>Nome do workspace<input required value={newWorkspaceName} onChange={(event) => setNewWorkspaceName(event.target.value)} placeholder="Flow Podcast" /></label>
+          <label>Slug<input required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" value={newWorkspaceSlug} onChange={(event) => setNewWorkspaceSlug(event.target.value)} placeholder="flow-podcast" /></label>
+          <button type="submit">Criar workspace</button>
+        </form>
+      )}
     </section>
   );
 }
