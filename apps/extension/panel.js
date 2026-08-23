@@ -9,7 +9,7 @@
   const SAFE_MAX = 420 * 1048576;
   const VERSION = chrome.runtime.getManifest().version;
   // Deve bater com BUILD_ID do background — divergência = script velho na aba
-  const BUILD_ID = "v0.5.7-b8";
+  const BUILD_ID = "v0.5.8-b9";
   let versionMismatch = false;
 
   let host = null;
@@ -131,6 +131,7 @@
       if (!host) return;
       const ph = jobState && jobState.phase;
       if (["DOWNLOADING", "UPLOADING", "PROCESSING", "TRIGGERING"].includes(ph)) render();
+      else if (meta.pendingStart) render();
     }, 1000);
   }
   function close() {
@@ -347,10 +348,14 @@
   function bodyChildren() {
     if (versionMismatch) return versionMismatchView();
     if (meta.pendingStart && (!jobState || ["FORM", "READY"].includes(jobState.phase))) {
+      const alive = meta.pendingSince ? Math.round((Date.now() - meta.pendingSince) / 1000) : 0;
       return [
-        el("div", { class: "phase-tag", text: "⟳ Iniciando transferência…" }),
+        el("div", { class: "phase-tag", text: "⟳ Etapa 1 de 4 — Iniciando transferência…" }),
         track(0),
-        el("div", { class: "note", text: "Preparando download no navegador…" }),
+        ...videoBlock(meta.video),
+        el("div", { class: "note", text: meta.pendingNote || "Preparando download no navegador…" }),
+        el("div", { class: "elapsed", text: "⏱ " + alive + "s" }),
+        el("div", { class: "note tiny", text: "Se travar aqui por mais de 1 minuto, abra o console da página (F12) e me mande as linhas [clipcon][painel]." }),
       ];
     }
     if (jobState && jobState.error) {
@@ -462,52 +467,81 @@
         startBtn.textContent = "Iniciando…";
         meta.pendingStart = true;
         render();
-        // Canal garantido: comando gravado no chrome.storage acorda o service worker
-        const reqTs = Date.now();
-        await new Promise((resolve) => {
-          chrome.storage.local.set(
-            {
-              startRequest: {
-                itag: meta.selectedItag,
-                workspaceId: meta.selectedWs,
-                tenantId: ws ? ws.tenant_id : null,
-                videoTitle: (meta.video && meta.video.title) || "",
-                ts: reqTs,
-              },
-            },
-            () => resolve()
-          );
-        });
+    // Canal garantido: comando gravado no chrome.storage acorda o service worker
+    const reqTs = Date.now();
+    let attempt = 0;
+    meta.pendingSince = Date.now();
+    meta.pendingNote = "Gravando comando de início…";
 
-        // Aguarda o resultado escrito pelo background
-        const deadline = Date.now() + 20000;
-        let answered = false;
-        while (Date.now() < deadline && !answered) {
-          await new Promise((r) => setTimeout(r, 400));
-          if (!meta.pendingStart) return; // um STATE já mudou a fase
-          const { startResult } = await chrome.storage.local.get("startResult");
-          if (startResult && startResult.ts === reqTs) {
-            answered = true;
-            meta.pendingStart = false;
-            if (startResult.ok === false) {
-              jobState = {
-                phase: "ERROR",
-                error: { stage: "start", message: startResult.error },
-              };
-              render();
-            }
-            return;
+    const writeRequest = () =>
+      new Promise((resolve) => {
+        attempt += 1;
+        meta.pendingNote =
+          attempt === 1
+            ? "Comando gravado — aguardando o service worker…"
+            : `Sem resposta — reenviando comando (${attempt}/3)…`;
+        render();
+        console.log(`[clipcon][painel] escrevendo startRequest (tentativa ${attempt})`, {
+          itag: meta.selectedItag,
+          workspaceId: meta.selectedWs,
+          ts: reqTs,
+        });
+        chrome.storage.local.set(
+          {
+            startRequest: {
+              itag: meta.selectedItag,
+              workspaceId: meta.selectedWs,
+              tenantId: ws ? ws.tenant_id : null,
+              videoTitle: (meta.video && meta.video.title) || "",
+              ts: reqTs,
+            },
+          },
+          () => {
+            console.log("[clipcon][painel] startRequest gravado.");
+            resolve();
           }
-        }
-        if (!answered && meta.pendingStart) {
-          meta.pendingStart = false;
+        );
+      });
+
+    await writeRequest();
+
+    // Aguarda resultado; se o background não engolir o comando, reenvia até 3x
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1000));
+      if (!meta.pendingStart) return; // um STATE já mudou a fase
+
+      const { startResult } = await chrome.storage.local.get("startResult");
+      if (startResult && startResult.ts === reqTs) {
+        console.log("[clipcon][painel] startResult recebido:", startResult);
+        meta.pendingStart = false;
+        if (startResult.ok === false) {
           jobState = {
             phase: "ERROR",
-            error: { stage: "start", message: "Tempo excedido ao iniciar (20s). Tente novamente." },
+            error: { stage: "start", message: startResult.error },
           };
           render();
         }
+        return;
+      }
+
+      const aliveSec = Math.round((Date.now() - meta.pendingSince) / 1000);
+      if (aliveSec >= 8 * attempt && attempt < 3) {
+        await writeRequest();
+      }
+    }
+
+    meta.pendingStart = false;
+    jobState = {
+      phase: "ERROR",
+      error: {
+        stage: "start",
+        message:
+          "O service worker não processou o comando após 3 tentativas (60s). Remova e reinstale a extensão em chrome://extensions e recarregue esta página (F5).",
       },
+    };
+    render();
+  },
     });
     out.push(startBtn);
     out.push(el("div", { class: "note", text: "O arquivo é baixado e enviado por este navegador. Nada fica no YouTube." }));

@@ -4,7 +4,7 @@
 
 // Identificador de build — atualizar JUNTO com manifest.version a cada release.
 // Usado para detectar content scripts velhos em abas abertas antes de uma atualização.
-const BUILD_ID = "v0.5.7-b8";
+const BUILD_ID = "v0.5.8-b9";
 
 const SAFE_MAX_BYTES = 420 * 1024 * 1024; // guarda prÃ©-flight vs bodyLimit da API
 const POLL_INTERVAL_MS = 5000;
@@ -348,11 +348,12 @@ async function handleStartRequest(req) {
   processedStartTs = req.ts;
   startLock = true;
   await chrome.storage.local.remove("startRequest");
-  console.log("[clipcon] processando startRequest", req);
+  console.log("[clipcon][bg] handleStartRequest:", JSON.stringify(req));
   const res = await startTransfer(req);
-  console.log("[clipcon] startTransfer ->", JSON.stringify(res));
+  console.log("[clipcon][bg] startTransfer ->", JSON.stringify(res));
   startLock = false;
   await chrome.storage.local.set({ startResult: { ts: req.ts, ...res } });
+  console.log("[clipcon][bg] startResult gravado.");
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -447,19 +448,24 @@ async function resolveProjectId(auth, workspaceId, tenantId, videoTitle) {
       `${auth.config.supabaseUrl}/rest/v1/projects?select=id,name&workspace_id=eq.${encodeURIComponent(workspaceId)}&order=created_at.desc&limit=1`;
     const res = await fetch(url, {
       headers: { apikey: auth.config.publishableKey, Authorization: `Bearer ${auth.token}` },
+      signal: AbortSignal.timeout(10000),
     });
     if (res.ok) {
       const rows = await res.json();
       if (Array.isArray(rows) && rows.length) return rows[0].id;
     }
-  } catch (_) {}
+  } catch (e) {
+    console.log("[clipcon][bg] listagem de projetos falhou:", e.message);
+  }
   // 2) nenhuma existe -> cria automaticamente com o titulo do vídeo
+  console.log("[clipcon][bg] criando projeto…");
   const c = await fetch(`${auth.config.apiUrl}/v1/projects`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${auth.token}`,
       "Content-Type": "application/json",
     },
+    signal: AbortSignal.timeout(15000),
     body: JSON.stringify({
       tenant_id: tenantId,
       workspace_id: workspaceId,
@@ -476,10 +482,13 @@ async function resolveProjectId(auth, workspaceId, tenantId, videoTitle) {
 
 async function startTransfer(params) {
   const { itag, workspaceId, tenantId, videoTitle } = params;
+  console.log("[clipcon][bg] startTransfer início", { itag, workspaceId, tenantId });
   let state, auth, fmt, projectId, filename, clen;
   try {
     state = await getState();
+    console.log("[clipcon][bg] state:", state ? `phase=${state.phase} formats=${Array.isArray(state.formats) ? state.formats.length : "null"}` : "null");
     auth = await getAuth();
+    console.log("[clipcon][bg] auth:", auth ? "ok" : "null");
     if (!state)
       return { ok: false, error: "Estado interno perdido — feche o painel e abra o vídeo novamente." };
     if (!auth)
@@ -524,7 +533,9 @@ async function startTransfer(params) {
     });
 
     await setState({ notice: "Resolvendo projeto na workspace…" });
+    console.log("[clipcon][bg] resolvendo projeto…");
     projectId = await resolveProjectId(auth, workspaceId, tenantId, videoTitle);
+    console.log("[clipcon][bg] projeto:", projectId);
 
     const safeTitle = String(state.video.title)
       .replace(/[^\w\s.-]/g, "")
@@ -535,7 +546,9 @@ async function startTransfer(params) {
 
     await setState({ projectId, filename, notice: null });
     badge("%", "#2563eb");
+    console.log("[clipcon][bg] criando offscreen…");
     await ensureOffscreen();
+    console.log("[clipcon][bg] offscreen pronto, disparando ENGINE_START");
     chrome.runtime.sendMessage({
       type: "ENGINE_START",
       job: {
