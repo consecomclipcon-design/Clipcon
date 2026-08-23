@@ -2,6 +2,10 @@
    polling do asset e disparo automÃ¡tico do Clip Studio. */
 "use strict";
 
+// Identificador de build — atualizar JUNTO com manifest.version a cada release.
+// Usado para detectar content scripts velhos em abas abertas antes de uma atualização.
+const BUILD_ID = "v0.5.7-b8";
+
 const SAFE_MAX_BYTES = 420 * 1024 * 1024; // guarda prÃ©-flight vs bodyLimit da API
 const POLL_INTERVAL_MS = 5000;
 const POLL_MAX_MS = 10 * 60 * 1000;
@@ -691,6 +695,10 @@ async function triggerClipStudio(projectId, assetId) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return;
 
+  if (msg.type === "UI_PING") {
+    sendResponse({ version: chrome.runtime.getManifest().version, buildId: BUILD_ID });
+    return;
+  }
   if (msg.type === "JOB_EVENT") {
     handleJobEvent(msg.event, msg.data || {});
     return;

@@ -8,6 +8,9 @@
 
   const SAFE_MAX = 420 * 1048576;
   const VERSION = chrome.runtime.getManifest().version;
+  // Deve bater com BUILD_ID do background — divergência = script velho na aba
+  const BUILD_ID = "v0.5.7-b8";
+  let versionMismatch = false;
 
   let host = null;
   let root = null;
@@ -163,12 +166,41 @@
 
   async function open(initialVideo) {
     ensure();
+    // Handshake de versão: aba com script velho não pode operar
+    try {
+      const ping = await send({ type: "UI_PING" });
+      versionMismatch = !ping || ping.buildId !== BUILD_ID;
+    } catch (_) {
+      versionMismatch = true;
+    }
+    if (versionMismatch) {
+      render();
+      return;
+    }
     pairAttemptedThisOpen = false;
     pairTries = 0;
     stopPairWatch();
     if (initialVideo && initialVideo.id) meta.video = initialVideo;
     render();
     await refreshAuth();
+  }
+
+  function versionMismatchView() {
+    return [
+      el("div", { class: "vid" }, [
+        el("strong", { text: "Atualize esta página" }),
+        el("span", {
+          text:
+            "A extensão foi atualizada mas esta aba do YouTube ainda roda o código antigo. Pressione F5 aqui e clique novamente em “Adicionar ao ClipCon”.",
+        }),
+      ]),
+      el("button", {
+        class: "p",
+        type: "button",
+        text: "Já recarreguei — verificar de novo",
+        onclick: () => open(null),
+      }),
+    ];
   }
 
   async function refreshAuth() {
@@ -313,6 +345,7 @@
   }
 
   function bodyChildren() {
+    if (versionMismatch) return versionMismatchView();
     if (meta.pendingStart && (!jobState || ["FORM", "READY"].includes(jobState.phase))) {
       return [
         el("div", { class: "phase-tag", text: "⟳ Iniciando transferência…" }),
