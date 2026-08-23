@@ -136,6 +136,9 @@
 
   async function open(initialVideo) {
     ensure();
+    pairAttemptedThisOpen = false;
+    pairTries = 0;
+    stopPairWatch();
     if (initialVideo && initialVideo.id) meta.video = initialVideo;
     render();
     await refreshAuth();
@@ -156,6 +159,7 @@
     }
     render();
     if (meta.loggedIn && !meta.workspaces.length) await loadWorkspaces();
+    if (!meta.loggedIn) startPairWatch();
   }
 
   let pairAttemptedThisOpen = false;
@@ -170,6 +174,37 @@
     } catch (_) {
       return null; // sem permissao ou clipboard vazio -> login manual
     }
+  }
+
+  // Escuta ativa: enquanto a tela de conexao estiver aberta, tenta absorver
+  // o codigo da clipboard a cada 3s (usuario pode clicar "Conectar extensao"
+  // no ClipCon DEPOIS de abrir o painel).
+  let pairTimer = null;
+  let pairTries = 0;
+  function startPairWatch() {
+    if (pairTimer) return;
+    pairTimer = setInterval(async () => {
+      if (meta.loggedIn) return stopPairWatch();
+      if (++pairTries > 20) return stopPairWatch();
+      try {
+        const text = await navigator.clipboard.readText();
+        const m = /^CC-[A-Z2-9]{8}$/.exec((text || "").trim().toUpperCase());
+        if (!m) return;
+        const r = await send({ type: "UI_PAIR", code: m[0] });
+        if (r && r.ok) {
+          stopPairWatch();
+          meta.loggedIn = true;
+          meta.email = r.email || null;
+          meta.authError = null;
+          render();
+          await loadWorkspaces();
+        }
+      } catch (_) {}
+    }, 3000);
+  }
+  function stopPairWatch() {
+    if (pairTimer) clearInterval(pairTimer);
+    pairTimer = null;
   }
 
   async function loadWorkspaces() {

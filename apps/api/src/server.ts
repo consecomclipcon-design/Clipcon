@@ -172,12 +172,11 @@ app.post("/v1/extension/pair", async (request, reply) => {
   const refreshToken = body.refresh_token?.trim();
   if (!refreshToken)
     return reply.code(400).send({ error: "refresh_token is required" });
+  // Refresh tokens do Supabase podem ser opacos (nao-JWT). Se for JWT,
+  // exigimos que pertença ao usuario da sessao; se opaco, a posse via
+  // requisicao autenticada (hook ja validou access token) e suficiente.
   const payload = decodeJwt(refreshToken);
-  if (
-    !payload ||
-    payload.sub !== request.user!.id ||
-    (typeof payload.exp === "number" && payload.exp * 1000 < Date.now())
-  ) {
+  if (payload && payload.sub && payload.sub !== request.user!.id) {
     return reply.code(400).send({ error: "refresh_token does not belong to session user" });
   }
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
