@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash as cryptoCreateHash } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -526,6 +526,29 @@ export async function handlePublishYoutube(supabase: SupabaseClient, job: Job) {
     .eq("id", clipId)
     .single();
   if (error || !clip) throw new Error("Rendered clip not found");
+
+  // Camada 5: publication guard — impedir publicação duplicada
+  const { data: existingPub } = await supabase
+    .from("publications")
+    .select("id, status, youtube_video_id")
+    .eq("clip_id", clipId)
+    .eq("status", "published")
+    .maybeSingle();
+  if (existingPub?.youtube_video_id) {
+    console.log(
+      `[publish] SKIP: clip ${clipId} já publicado como ${existingPub.youtube_video_id}`,
+    );
+    if (publicationId) {
+      await supabase.from("publications").update({
+        status: "published",
+        youtube_video_id: existingPub.youtube_video_id,
+        youtube_url: `https://www.youtube.com/shorts/${existingPub.youtube_video_id}`,
+        updated_at: new Date().toISOString(),
+      }).eq("id", publicationId);
+    }
+    return; // já publicado — não duplicar
+  }
+
   await setProgress(supabase, job, 97);
   let data: Buffer;
   if (clip.local_path) {
@@ -1464,16 +1487,26 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
 
     // Anti-duplicação: overlap temporal + similaridade semântica + diversidade.
     // Guard extra: descarta momentos já usados em runs anteriores do mesmo vídeo.
-    const priorCandidates = sourceVideoId
+    // Anti-duplicação multi-camada:
+    // L1: overlap temporal dentro do run (selectDiverse)
+    // L2: similaridade semântica (Jaccard no texto)
+    // L3: guard contra candidatos já usados em runs anteriores DO MESMO VÍDEO
+    //     (busca por youtube_video_id na source_videos → projects da mesma workspace)
+    const priorCandidates: Array<{ start_seconds: number; end_seconds: number }> = sourceVideoId
       ? (
-          await supabase
-            .from("clip_candidates")
-            .select("start_seconds, end_seconds")
-            .eq("project_id", run.project_id)
-            .neq("status", "discarded")
-            .limit(500)
+          await supabase.rpc("prior_candidates_for_source", {
+            p_source_video_id: sourceVideoId,
+          })
         ).data ?? []
       : [];
+    if (!priorCandidates.length && sourceVideoId) {
+      const fallback = await supabase
+        .from("clip_candidates")
+        .select("start_seconds, end_seconds")
+        .eq("project_id", run.project_id)
+        .limit(500);
+      priorCandidates.push(...((fallback.data ?? []) as Array<{ start_seconds: number; end_seconds: number }>));
+    }
     const priorAsDedup = priorCandidates.map((row) => ({
       start: Number(row.start_seconds),
       end: Number(row.end_seconds),
@@ -1672,6 +1705,22 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
         },
       );
       const buffer = await readFileBuffer(renderedPath);
+
+      // Camada 4: file hash — se já existe asset com mesmo hash, pular
+      const fileHash = cryptoCreateHash("sha256").update(buffer).digest("hex");
+      const { data: hashDup } = await supabase
+        .from("media_assets")
+        .select("id, name")
+        .contains("metadata", { file_hash: fileHash })
+        .neq("project_id", run.project_id)
+        .limit(1);
+      if (hashDup?.length) {
+        console.log(
+          `[ClipStudio:${run.id}] SKIP clip ${index}: file hash duplicado com asset ${hashDup[0].id} (${hashDup[0].name})`,
+        );
+        continue;
+      }
+
       const outputPath = `${run.tenant_id}/${run.project_id}/clip-studio/${run.id}/${candidateRow.id}.mp4`;
       const uploaded = await supabase.storage
         .from("clipcon-media")
@@ -1695,6 +1744,7 @@ export async function handleClipStudio(supabase: SupabaseClient, job: Job) {
            folder_id: outputFolder.id,
            metadata: {
              source_asset_id: assetId ?? null,
+             file_hash: fileHash,
             clip_studio_run_id: run.id,
             smart_crop: smartCrop,
           },
