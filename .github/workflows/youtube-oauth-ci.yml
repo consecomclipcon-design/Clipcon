@@ -1,0 +1,27 @@
+name: YouTube OAuth and upload verification
+on:
+  push:
+    branches:
+      - "fix/youtube-oauth-upload-safety-20261019"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "apps/worker/**"
+      - ".github/workflows/youtube-oauth-ci.yml"
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace @clipcon/api
+      - run: npm run build --workspace @clipcon/worker
+      - run: npm run test --workspace @clipcon/api
+      - run: npm run test --workspace @clipcon/worker
