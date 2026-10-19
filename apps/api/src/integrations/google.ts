@@ -50,9 +50,14 @@ export function verifyOAuthState(value: string): OAuthState | null {
   if (!payload || !signature) return null;
   const expected = crypto.createHmac('sha256', config.APP_SECRET).update(payload).digest('base64url');
   if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
-  const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as OAuthState;
-  if (parsed.provider !== 'drive' && parsed.provider !== 'youtube') return null;
-  return parsed.expiresAt > Date.now() ? parsed : null;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as OAuthState;
+    if (parsed.provider !== 'drive' && parsed.provider !== 'youtube') return null;
+    if (typeof parsed.userId !== 'string' || typeof parsed.tenantId !== 'string' || typeof parsed.workspaceId !== 'string') return null;
+    return parsed.expiresAt > Date.now() ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchGoogleEmail(accessToken: string) {
@@ -90,6 +95,28 @@ export async function fetchAccountLabel(provider: GoogleProvider, accessToken: s
   return { email: null, label: null, type: null };
 }
 
+/**
+ * Resolve the actual channel selected during YouTube OAuth before storing its
+ * credentials. The channel ID, not the Google email, is the publishing identity.
+ */
+export async function fetchYoutubeChannelIdentity(accessToken: string) {
+  const response = await fetch(
+    "https://www.googleapis.com/youtube/v3/channels?part=id,snippet&mine=true",
+    { headers: { Authorization: "Bearer " + accessToken } },
+  );
+  if (!response.ok)
+    throw new Error("Could not verify the selected YouTube channel");
+  const result = (await response.json()) as {
+    items?: Array<{ id?: string; snippet?: { title?: string } }>;
+  };
+  if (result.items?.length !== 1 || !result.items[0]?.id)
+    throw new Error("Google authorization must select exactly one YouTube channel");
+  return {
+    channelId: result.items[0].id!,
+    channelTitle: result.items[0].snippet?.title ?? null,
+  };
+}
+
 export async function getStoredToken(tenantId: string, provider: GoogleProvider, workspaceId?: string) {
   let query = admin.from('integrations').select('encrypted_access_token, encrypted_refresh_token, token_expires_at').eq('tenant_id', tenantId).eq('provider', provider);
   if (workspaceId) query = query.eq('workspace_id', workspaceId);
@@ -98,6 +125,7 @@ export async function getStoredToken(tenantId: string, provider: GoogleProvider,
   const accessToken = decryptToken(data.encrypted_access_token);
   const refreshToken = data.encrypted_refresh_token ? decryptToken(data.encrypted_refresh_token) : null;
   const expiresAt = data.token_expires_at ? new Date(data.token_expires_at).getTime() : 0;
+  if (!refreshToken && (!expiresAt || expiresAt - Date.now() < 60_000)) return null;
   if (refreshToken && (!expiresAt || expiresAt - Date.now() < 60_000)) {
     try {
       const client = createGoogleClient();
@@ -109,7 +137,7 @@ export async function getStoredToken(tenantId: string, provider: GoogleProvider,
         await refreshQuery;
         return credentials.access_token;
       }
-    } catch { /* keep current access token */ }
+    } catch { return null; /* Fail closed: expired access cannot authorize uploads. */ }
   }
   return accessToken;
 }

@@ -9,6 +9,7 @@ import {
   createGoogleClient,
   encryptToken,
   fetchAccountLabel,
+  fetchYoutubeChannelIdentity,
   getProviderScopes,
   getStoredToken,
   listDriveFolders,
@@ -19,6 +20,7 @@ import {
   type GoogleProvider,
 } from "./integrations/google.js";
 import { youtubeVideoId } from "./youtube-url.js";
+import { keepOfflineRefreshToken, oauthScopesGranted, YOUTUBE_UPLOAD_SCOPE } from "./integrations/google-policy.js";
 import { saveProviderKey, type ProviderSlug } from "./ai-providers.js";
 
 const app = Fastify({
@@ -2140,6 +2142,7 @@ app.get("/v1/integrations/google/status", async (request, reply) => {
     {
       accountEmail: string | null;
       accountLabel: string | null;
+      channelId: string | null;
       lastError: string | null;
       connected: boolean;
     }
@@ -2150,6 +2153,7 @@ app.get("/v1/integrations/google/status", async (request, reply) => {
       accountLabel:
         (row.metadata as { accountLabel?: string } | null)?.accountLabel ??
         null,
+      channelId: (row.metadata as { channelId?: string } | null)?.channelId ?? null,
       lastError: row.last_error ?? null,
       connected: Boolean(row.connected_at),
     };
@@ -2158,6 +2162,7 @@ app.get("/v1/integrations/google/status", async (request, reply) => {
     connected: Boolean(byProvider[provider]?.connected),
     accountEmail: byProvider[provider]?.accountEmail ?? null,
     accountLabel: byProvider[provider]?.accountLabel ?? null,
+    channelId: byProvider[provider]?.channelId ?? null,
     lastError: byProvider[provider]?.lastError ?? null,
   });
   return {
@@ -2228,49 +2233,95 @@ app.get("/v1/integrations/google/callback", async (request, reply) => {
     state?: string;
     error?: string;
   };
-  if (query.error) return reply.redirect(`${config.WEB_ORIGIN}/?google=denied`);
+  if (query.error)
+    return reply.redirect(`${config.WEB_ORIGIN}/?google=denied`);
   if (!query.code || !query.state)
     return reply.redirect(`${config.WEB_ORIGIN}/?google=invalid`);
   const state = verifyOAuthState(query.state);
-  if (!state) return reply.redirect(`${config.WEB_ORIGIN}/?google=expired`);
-  const client = createGoogleClient();
-  const { tokens } = await client.getToken(query.code);
-  if (!tokens.refresh_token && !tokens.access_token)
-    return reply.redirect(
-      `${config.WEB_ORIGIN}/?google=notokens&provider=${state.provider}`,
+  if (!state)
+    return reply.redirect(`${config.WEB_ORIGIN}/?google=expired`);
+
+  // The callback has no session bearer, so re-check the signed state owner's
+  // workspace membership before storing an OAuth grant.
+  const workspace = await getWorkspaceForUser(state.workspaceId, state.userId);
+  if (!workspace || workspace.tenant_id !== state.tenantId)
+    return reply.redirect(`${config.WEB_ORIGIN}/?google=forbidden`);
+
+  try {
+    const client = createGoogleClient();
+    const { tokens } = await client.getToken(query.code);
+    if (!tokens.access_token)
+      return reply.redirect(`${config.WEB_ORIGIN}/?google=notokens&provider=${state.provider}`);
+
+    // Validate granted scopes, not just the scopes originally requested.
+    // A token with only Google identity scopes must never be used for uploads.
+    let granted = tokens.scope ?? "";
+    if (!granted) {
+      const info = await fetch(
+        "https://oauth2.googleapis.com/tokeninfo?access_token=" +
+          encodeURIComponent(tokens.access_token),
+      );
+      if (info.ok) {
+        const json = (await info.json()) as { scope?: string };
+        granted = json.scope ?? "";
+      }
+    }
+    const requiredScopes = state.provider === "youtube"
+      ? [YOUTUBE_UPLOAD_SCOPE]
+      : getProviderScopes("drive");
+    if (!oauthScopesGranted(granted, requiredScopes))
+      return reply.redirect(`${config.WEB_ORIGIN}/?google=scopes&provider=${state.provider}`);
+
+    const { data: previous, error: previousError } = await admin
+      .from("integrations")
+      .select("encrypted_refresh_token, metadata")
+      .eq("tenant_id", state.tenantId)
+      .eq("workspace_id", state.workspaceId)
+      .eq("provider", state.provider)
+      .maybeSingle();
+    if (previousError)
+      return reply.redirect(`${config.WEB_ORIGIN}/?google=savefailed&provider=${state.provider}`);
+
+    const encryptedRefresh = keepOfflineRefreshToken(
+      tokens.refresh_token ? encryptToken(tokens.refresh_token) : null,
+      previous?.encrypted_refresh_token,
     );
-  const account = tokens.access_token
-    ? await fetchAccountLabel(state.provider, tokens.access_token)
-    : { email: null, label: null, type: null };
-  const { error } = await admin.from("integrations").upsert(
-    {
-      tenant_id: state.tenantId,
-      workspace_id: state.workspaceId,
-      provider: state.provider,
-      scopes: getProviderScopes(state.provider),
-      account_email: account.email,
-      encrypted_access_token: tokens.access_token
-        ? encryptToken(tokens.access_token)
-        : null,
-      encrypted_refresh_token: tokens.refresh_token
-        ? encryptToken(tokens.refresh_token)
-        : null,
-      token_expires_at: tokens.expiry_date
-        ? new Date(tokens.expiry_date).toISOString()
-        : null,
-      connected_at: new Date().toISOString(),
-      last_error: null,
-      metadata: { accountLabel: account.label, accountType: account.type },
-    },
-    { onConflict: "workspace_id,provider" },
-  );
-  if (error)
-    return reply.redirect(
-      `${config.WEB_ORIGIN}/?google=savefailed&provider=${state.provider}`,
+    const account = await fetchAccountLabel(state.provider, tokens.access_token);
+    const channel = state.provider === "youtube"
+      ? await fetchYoutubeChannelIdentity(tokens.access_token)
+      : null;
+    // No Google email can substitute for a YouTube channel ID.
+    const metadata = {
+      ...(previous?.metadata ?? {}),
+      accountLabel: channel?.channelTitle ?? account.label,
+      accountType: channel ? "channel" : account.type,
+      ...(channel ? { channelId: channel.channelId } : {}),
+    };
+    const { error } = await admin.from("integrations").upsert(
+      {
+        tenant_id: state.tenantId,
+        workspace_id: state.workspaceId,
+        provider: state.provider,
+        scopes: granted.split(/\s+/).filter(Boolean),
+        account_email: account.email,
+        encrypted_access_token: encryptToken(tokens.access_token),
+        encrypted_refresh_token: encryptedRefresh,
+        token_expires_at: tokens.expiry_date
+          ? new Date(tokens.expiry_date).toISOString()
+          : null,
+        connected_at: new Date().toISOString(),
+        last_error: null,
+        metadata,
+      },
+      { onConflict: "workspace_id,provider" },
     );
-  return reply.redirect(
-    `${config.WEB_ORIGIN}/?google=connected&provider=${state.provider}`,
-  );
+    if (error)
+      return reply.redirect(`${config.WEB_ORIGIN}/?google=savefailed&provider=${state.provider}`);
+    return reply.redirect(`${config.WEB_ORIGIN}/?google=connected&provider=${state.provider}`);
+  } catch {
+    // Never send OAuth codes, access tokens or refresh tokens to browser/logs.
+    return reply.redirect(`${config.WEB_ORIGIN}/?google=reauthorize&provider=${state.provider}`);
+  }
 });
 app.get("/*", async (request, reply) => {
   if (request.method !== "GET" || request.url.startsWith("/v1/"))

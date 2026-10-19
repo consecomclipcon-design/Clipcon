@@ -23,3 +23,12 @@ O serviço `Clipcon` usa `railway.toml` + `Dockerfile` para servir Web e API no 
 ## Incidente de credenciais
 
 Nunca cole secret keys, `service_role`, senhas ou tokens em commits, issues ou chats. Se uma credencial for exposta, revogue-a e gere outra no Supabase antes de configurar o ambiente. A chave pública pode ser usada no navegador somente com RLS e policies aplicadas.
+
+## Publicação de Shorts no YouTube
+
+O ClipCon reutiliza a integração Google OAuth já existente. **Guia técnico e de
+produção:** [docs/YOUTUBE_OAUTH_DEPLOY.md](docs/YOUTUBE_OAUTH_DEPLOY.md).
+
+O worker de publicação exige o canal identificado por OAuth e envia novos vídeos
+em **modo privado por padrão**. A autorização do proprietário do canal e o teste
+real de upload são necessários antes de habilitar postagem pública automática.
