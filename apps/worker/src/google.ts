@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { config } from "./config.js";
 import { decryptToken, encryptToken, requireAppSecret } from "./crypto.js";
+import { assertChannelMatch, parseYoutubeVideoId, resolveUploadPrivacy, type YoutubePrivacy } from "./youtube-policy.js";
 
 export type GoogleProvider = "drive" | "youtube";
 
@@ -25,6 +26,7 @@ export async function getAccessToken(
   tenantId: string,
   provider: GoogleProvider,
   workspaceId?: string,
+  forceRefresh = false,
 ) {
   requireAppSecret();
   let query = supabase
@@ -44,7 +46,9 @@ export async function getAccessToken(
     ? new Date(data.token_expires_at).getTime()
     : 0;
   const needsRefresh =
-    !!refreshToken && (!expiresAt || expiresAt - Date.now() < 60_000);
+    !!refreshToken && (forceRefresh || !expiresAt || expiresAt - Date.now() < 60_000);
+  if (!refreshToken && (!expiresAt || expiresAt - Date.now() < 60_000))
+    throw new Error("Google refresh token is missing; reconnect the integration");
   if (needsRefresh) {
     const fresh = await refreshAccessToken(refreshToken);
     await supabase
@@ -83,7 +87,12 @@ async function refreshAccessToken(refreshToken: string) {
         res.status +
         " - reconnect the Google integration",
     );
-  return (await res.json()) as { access_token: string; expiry_date?: number };
+  const data = (await res.json()) as { access_token?: string; expires_in?: number };
+  if (!data.access_token) throw new Error("Google did not return an access token");
+  return {
+    access_token: data.access_token,
+    expiry_date: Date.now() + Math.max(60, Number(data.expires_in ?? 3600)) * 1000,
+  };
 }
 
 function isUnauthorized(message: string) {
@@ -192,21 +201,55 @@ export async function uploadVideoToYouTube(
   description: string,
   data: Buffer,
   workspaceId?: string,
+  options: {
+    privacyStatus?: YoutubePrivacy;
+    explicitlyApprovedPublic?: boolean;
+  } = {},
 ) {
+  if (!workspaceId) throw new Error("YouTube upload requires a verified workspace");
+  if (!data.length) throw new Error("Cannot upload an empty video");
+
+  const visibility = resolveUploadPrivacy(options.privacyStatus, {
+    explicitlyApprovedPublic: options.explicitlyApprovedPublic,
+  });
+  const { data: integration, error } = await supabase
+    .from("integrations")
+    .select("metadata, encrypted_refresh_token")
+    .eq("tenant_id", tenantId)
+    .eq("workspace_id", workspaceId)
+    .eq("provider", "youtube")
+    .maybeSingle();
+  if (error || !integration?.encrypted_refresh_token)
+    throw new Error("YouTube offline authorization is required: reconnect this workspace");
+  const expectedChannelId = (integration.metadata as { channelId?: string } | null)?.channelId;
+  if (!expectedChannelId)
+    throw new Error("YouTube channel identity missing: reconnect and approve the correct channel");
+
   const metadata = {
-    snippet: { title, description, categoryId: "22" },
-    status: { privacyStatus: "public" },
+    snippet: { title: title.slice(0, 100), description, categoryId: "22" },
+    status: { privacyStatus: visibility },
   };
-  // Resumable upload — exigido pela YouTube Data API para vídeos.
-  // https://developers.google.com/youtube/v3/guides/using_resumable_upload_protocol
-  let token = await getAccessToken(supabase, tenantId, "youtube", workspaceId);
-  async function run(t: string) {
+
+  async function verifyChannel(accessToken: string) {
+    const response = await fetch(
+      "https://www.googleapis.com/youtube/v3/channels?part=id,snippet&mine=true",
+      { headers: { Authorization: "Bearer " + accessToken } },
+    );
+    if (!response.ok) throw new Error("YouTube channel verification failed: HTTP " + response.status);
+    const json = (await response.json()) as { items?: Array<{ id?: string }> };
+    const actualId = json.items?.length === 1 ? json.items[0]?.id : undefined;
+    return assertChannelMatch(actualId, expectedChannelId);
+  }
+
+  async function upload(accessToken: string) {
+    const channelId = await verifyChannel(accessToken);
+    // All new videos default to PRIVATE; public is available only with explicit approval.
     const init = await fetch(
       "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${t}`,
+          Authorization: "Bearer " + accessToken,
           "Content-Type": "application/json; charset=UTF-8",
           "X-Upload-Content-Type": "video/mp4",
           "X-Upload-Content-Length": String(data.length),
@@ -215,31 +258,36 @@ export async function uploadVideoToYouTube(
       },
     );
     if (!init.ok)
-      throw new Error(
-        `YouTube resumable init failed: ${init.status} ${await init.text()}`,
-      );
+      throw new Error("YouTube resumable init failed: HTTP " + init.status);
     const sessionUrl = init.headers.get("location");
-    if (!sessionUrl)
-      throw new Error("YouTube resumable session missing Location");
+    if (!sessionUrl?.startsWith("https://www.googleapis.com/"))
+      throw new Error("YouTube resumable upload session is missing or invalid");
+
     const put = await fetch(sessionUrl, {
       method: "PUT",
-      headers: { "Content-Length": String(data.length) },
+      headers: {
+        "Content-Length": String(data.length),
+        "Content-Type": "video/mp4",
+      },
       body: new Uint8Array(data),
     });
     if (!put.ok)
-      throw new Error(
-        `YouTube resumable upload failed: ${put.status} ${await put.text()}`,
-      );
-    return (await put.json()) as { id: string };
+      throw new Error("YouTube upload did not complete; inspect session before retrying: HTTP " + put.status);
+    const videoId = parseYoutubeVideoId(await put.json());
+    return { id: videoId, channelId, privacyStatus: visibility };
   }
+
+  let token = await getAccessToken(supabase, tenantId, "youtube", workspaceId);
   try {
-    return await run(token);
-  } catch (err) {
-    if (isUnauthorized(err instanceof Error ? err.message : String(err))) {
-      token = await getAccessToken(supabase, tenantId, "youtube", workspaceId);
-      return await run(token);
-    }
-    throw err;
+    return await upload(token);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Retry auth only if the session was not started; never repeat an
+    // ambiguous video PUT which might already have created the upload.
+    if (!/channel verification failed: HTTP 401/.test(message))
+      throw error;
+    token = await getAccessToken(supabase, tenantId, "youtube", workspaceId, true);
+    return await upload(token);
   }
 }
 
