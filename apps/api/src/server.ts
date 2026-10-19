@@ -2142,6 +2142,7 @@ app.get("/v1/integrations/google/status", async (request, reply) => {
     {
       accountEmail: string | null;
       accountLabel: string | null;
+      channelId: string | null;
       lastError: string | null;
       connected: boolean;
     }
@@ -2152,6 +2153,7 @@ app.get("/v1/integrations/google/status", async (request, reply) => {
       accountLabel:
         (row.metadata as { accountLabel?: string } | null)?.accountLabel ??
         null,
+      channelId: (row.metadata as { channelId?: string } | null)?.channelId ?? null,
       lastError: row.last_error ?? null,
       connected: Boolean(row.connected_at),
     };
@@ -2160,6 +2162,7 @@ app.get("/v1/integrations/google/status", async (request, reply) => {
     connected: Boolean(byProvider[provider]?.connected),
     accountEmail: byProvider[provider]?.accountEmail ?? null,
     accountLabel: byProvider[provider]?.accountLabel ?? null,
+    channelId: byProvider[provider]?.channelId ?? null,
     lastError: byProvider[provider]?.lastError ?? null,
   });
   return {
